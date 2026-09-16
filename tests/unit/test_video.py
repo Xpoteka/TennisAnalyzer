@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import numpy as np
 import pytest
 
 from tennis.stages.ingest import frame_rate_warnings
 from tennis.util.video import (
     FrameIntervals,
     VideoStream,
+    frame_intervals,
     is_variable_frame_rate,
+    nearest_frames,
     parse_creation_time,
     parse_rate,
 )
@@ -68,3 +71,21 @@ def test_frame_rate_warnings(fps: float | None, fragment: str) -> None:
 @pytest.mark.parametrize("fps", [30.0, 60.0, 119.88, 240.0])
 def test_supported_frame_rates_do_not_warn(fps: float) -> None:
     assert frame_rate_warnings(fps) == []
+
+
+def test_frame_intervals_from_pts() -> None:
+    pts = np.arange(100) / 120.0
+    fi = frame_intervals(pts)
+    assert fi.frames == 100
+    assert fi.median_ms == pytest.approx(1000 / 120)
+    assert fi.spread == pytest.approx(0, abs=1e-6)
+    assert frame_intervals(np.array([0.0])).median_ms == 0.0
+
+
+def test_nearest_frames() -> None:
+    pts = np.array([0.0, 0.04, 0.08, 0.2])
+    times = np.array([-1.0, 0.019, 0.02, 0.021, 0.13, 0.15, 5.0])
+    assert nearest_frames(pts, times).tolist() == [0, 0, 0, 1, 2, 3, 3]
+    assert nearest_frames(np.array([1.0]), np.array([0.0, 2.0])).tolist() == [0, 0]
+    with pytest.raises(ValueError):
+        nearest_frames(np.array([]), np.array([1.0]))

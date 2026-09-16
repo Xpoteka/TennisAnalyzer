@@ -19,6 +19,8 @@ audio:                       # Stage 2: contact detection
   threshold_window_s: 5.0    # Sliding window for the adaptive threshold (s).
   min_separation_s: 0.25     # Minimum time between two contacts (s).
   amplitude_window_s: 0.02   # Half-width of the window for peak RMS amplitude (s).
+  min_prominence_db: 6.0     # Onsets must be this much louder than the local background
+                             # (drops noise flickers; not in the spec).
   own_hit_db_threshold: 6.0  # A contact is "self" if this many dB above the session median.
   wrist_confirm_window_s: 0.15   # Wrist-speed peak must be this close to the onset (s).
 

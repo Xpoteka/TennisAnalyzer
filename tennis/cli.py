@@ -131,12 +131,101 @@ def trends(
 @app.command("tune-contacts")
 def tune_contacts(
     session_id: str,
-    labels: Annotated[Path, typer.Option(help="CSV of labeled impact times.")],
+    labels: Annotated[Path, typer.Option(help="CSV of impact times (video time, s or m:ss.sss).")],
     config: ConfigOpt = None,
+    target: Annotated[
+        str,
+        typer.Option(help="self: labels are your own hits. any: labels are all players' hits."),
+    ] = "self",
+    k: Annotated[str | None, typer.Option("--k", help="onset_k values, comma-separated.")] = None,
+    cutoff: Annotated[
+        str | None, typer.Option("--cutoff", help="highpass_hz values, comma-separated.")
+    ] = None,
+    db: Annotated[
+        str | None, typer.Option("--db", help="own_hit_db_threshold values, comma-separated.")
+    ] = None,
+    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
+    label_offset: Annotated[
+        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
+    ] = 0.0,
+    label_resolution: Annotated[
+        float,
+        typer.Option(help="Label precision in seconds: a label t means [t, t + this]."),
+    ] = 0.0,
+    segments: Annotated[
+        Path | None,
+        typer.Option(
+            help="CSV of start,end ranges to evaluate (e.g. rallies), on the labels' clock."
+        ),
+    ] = None,
+    start: Annotated[
+        str | None, typer.Option(help="Start of the labeled range (default: first label - 1 s).")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option(help="End of the labeled range (default: last label + 1 s).")
+    ] = None,
+    top: Annotated[int, typer.Option(help="Rows to show.")] = 15,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
 ) -> None:
     """Grid-search contact detection parameters against labeled impacts."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("tune-contacts", "M2")
+    from tennis.stages import contacts
+    from tennis.validation import parse_time, read_segments, read_time_labels
+
+    if label_resolution < 0 or tolerance_ms < 0:
+        raise UserError("--label-resolution and --tolerance-ms must not be negative")
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    spec = contacts.LabelSpec(
+        times_s=read_time_labels(labels),
+        tolerance_s=tolerance_ms / 1000,
+        resolution_s=label_resolution,
+        offset_s=label_offset,
+    )
+
+    ranges: list[tuple[float, float]] | None = None
+    if segments is not None:
+        if start is not None or end is not None:
+            raise UserError("use either --segments or --start/--end, not both")
+        ranges = read_segments(segments)
+    elif start is not None or end is not None:
+        try:
+            lo = parse_time(start) if start is not None else 0.0
+            hi = parse_time(end) if end is not None else float("inf")
+        except ValueError as exc:
+            raise UserError(f"--start/--end: {exc}") from exc
+        ranges = [(lo, hi)]
+
+    typer.echo(
+        f"tuning on {spec.times_s.size} labels; this runs detection once per cutoff...", err=True
+    )
+    result = contacts.tune_contacts(
+        session,
+        cfg.audio,
+        spec,
+        target=target,
+        ks=_float_list(k, "k") or contacts.DEFAULT_GRID_K,
+        cutoffs=_float_list(cutoff, "cutoff") or contacts.DEFAULT_GRID_CUTOFF,
+        db_thresholds=_float_list(db, "db") or contacts.DEFAULT_GRID_DB,
+        segments=ranges,
+    )
+    typer.echo(contacts.format_tune_report(result, top=top))
+    if report_path is not None:
+        contacts.write_tune_report(result, report_path, top=top)
+        typer.echo(f"wrote {report_path}", err=True)
+
+
+def _float_list(value: str | None, name: str) -> list[float] | None:
+    if value is None:
+        return None
+    try:
+        items = [float(v) for v in value.split(",") if v.strip()]
+    except ValueError as exc:
+        raise UserError(f"--{name}: expected comma-separated numbers, got {value!r}") from exc
+    if not items:
+        raise UserError(f"--{name}: no values given")
+    return items
 
 
 @app.command("eval-classifier")

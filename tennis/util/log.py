@@ -37,10 +37,25 @@ class ConsoleFormatter(logging.Formatter):
         return f"{level}{prefix}{record.getMessage()}" + (f"  ({extras})" if extras else "")
 
 
+class _StderrHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Writes to the current ``sys.stderr`` at emit time, so it survives stream swaps."""
+
+    def __init__(self) -> None:
+        super().__init__(sys.stderr)
+
+    @property
+    def stream(self) -> Any:
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value: Any) -> None:
+        pass
+
+
 def get_logger() -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     if not any(getattr(h, "_tennis_console", False) for h in logger.handlers):
-        handler = logging.StreamHandler(sys.stderr)
+        handler = _StderrHandler()
         handler.setFormatter(ConsoleFormatter())
         handler._tennis_console = True  # type: ignore[attr-defined]
         logger.addHandler(handler)
