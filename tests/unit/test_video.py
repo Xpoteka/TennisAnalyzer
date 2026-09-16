@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tennis.stages.ingest import frame_rate_warnings
 from tennis.util.video import (
     FrameIntervals,
     VideoStream,
@@ -49,3 +50,21 @@ def test_uneven_intervals_are_vfr() -> None:
 
 def test_rate_mismatch_is_vfr() -> None:
     assert is_variable_frame_rate(_stream(120, 100), _intervals(8.3, 8.3, 8.3))
+
+
+@pytest.mark.parametrize(
+    ("fps", "fragment"),
+    [
+        (23.976, "low frame rate 23.98 fps"),
+        (500.0, "high frame rate"),
+        (None, "unknown"),
+    ],
+)
+def test_frame_rate_warnings(fps: float | None, fragment: str) -> None:
+    (warning,) = frame_rate_warnings(fps)
+    assert fragment in warning
+
+
+@pytest.mark.parametrize("fps", [30.0, 60.0, 119.88, 240.0])
+def test_supported_frame_rates_do_not_warn(fps: float) -> None:
+    assert frame_rate_warnings(fps) == []

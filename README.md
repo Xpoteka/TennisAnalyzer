@@ -20,7 +20,7 @@ Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` dire
 ## Recording guidelines
 
 - Mount the camera on a tripod in the **same position every session**: behind the baseline, slightly off-centre, raised.
-- Use 100–120 fps if you can. The pipeline accepts 30–240 fps, including variable frame rate.
+- Use 100–120 fps if you can. The pipeline is designed for 30–240 fps, including variable frame rate. Lower rates (for example 24 fps) still work, but ingest warns because contact timing and wrist speeds will be less precise.
 - Record the clip-on microphone **into the camera file**. Ingest fails if the video has no audio track.
 - Keep yourself the largest person on the near side of the court. A hitting partner on the far side is fine.
 - Keep the camera clock correct. Session IDs come from the video's creation timestamp.

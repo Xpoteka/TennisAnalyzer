@@ -55,6 +55,7 @@ Every Parquet output carries these key/value metadata entries: `tennis.pipeline_
 | Field | Meaning |
 |-------|---------|
 | `duration_s`, `fps`, `is_vfr`, `resolution`, `codec`, `audio_sample_rate`, `creation_time` | The fields the spec names. `fps` is the nominal rate; `audio_sample_rate` is the WAV rate (48000). |
+| `warnings` | Human-readable warnings, for example a frame rate outside 30–240 fps. They are also logged at WARNING level. |
 | `creation_time_source` | `container` (a metadata tag) or `filesystem` (fallback) |
 | `video_start_s`, `audio_start_s` | Stream start PTS values; see "Time conventions" |
 | `video.*` | Stream index, codec, pix_fmt, width, height, rotation, nominal and average fps, `nb_frames`, and sampled frame-interval stats (median, p01 and p99 in ms, over the first 30 s) |

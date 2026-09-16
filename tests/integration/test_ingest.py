@@ -39,6 +39,7 @@ def test_ingest_writes_metadata_and_audio(make_video: MakeVideo, data_root: Path
     meta = json.loads((session.dir / "metadata.json").read_text())
     assert meta["fps"] == pytest.approx(120)
     assert meta["is_vfr"] is False
+    assert meta["warnings"] == []
     assert meta["resolution"] == [320, 240]
     assert meta["codec"] == "h264"
     assert meta["audio_sample_rate"] == 48_000
@@ -124,3 +125,15 @@ def test_corrupt_video_fails_ingest(tmp_path: Path, data_root: Path) -> None:
     with pytest.raises(StageError) as info:
         run_pipeline(session, _config(data_root), get_logger())
     assert info.value.stage == "ingest"
+
+
+def test_low_frame_rate_is_processed_with_warning(make_video: MakeVideo, data_root: Path) -> None:
+    video = make_video("24fps.mp4", fps=24)
+    session = _session(data_root, video)
+    assert run_pipeline(session, _config(data_root), get_logger()) == ["ingest"]
+    meta = json.loads((session.dir / "metadata.json").read_text())
+    assert meta["fps"] == pytest.approx(24)
+    assert len(meta["warnings"]) == 1
+    assert "low frame rate" in meta["warnings"][0]
+    events = [json.loads(line) for line in (session.dir / "pipeline.log").read_text().splitlines()]
+    assert any(e["level"] == "WARNING" and "low frame rate" in e["event"] for e in events)
