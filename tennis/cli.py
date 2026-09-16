@@ -128,6 +128,43 @@ def trends(
     _not_implemented("trends", "M7")
 
 
+@app.command("pose-preview")
+def pose_preview(
+    session_id: str,
+    config: ConfigOpt = None,
+    count: Annotated[int, typer.Option(min=1, help="Swings (analysis windows) to render.")] = 20,
+    seed: Annotated[int, typer.Option(help="Random seed for the sample.")] = 0,
+    speed: Annotated[
+        float, typer.Option(min=0.05, max=4.0, help="Playback speed, e.g. 0.25 for slow motion.")
+    ] = 1.0,
+    out: Annotated[
+        Path | None, typer.Option(help="Output MP4 (default: <session>/debug/pose_preview.mp4).")
+    ] = None,
+) -> None:
+    """Render sampled swings with the tracked skeleton for review (M3 acceptance)."""
+    from tennis.review import render_pose_preview
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    path, summaries = render_pose_preview(
+        session, cfg, count=count, seed=seed, speed=speed, out=out
+    )
+    typer.echo(f"{'window':>6}  {'start_s':>8}  {'frames':>6}  {'tracked':>7}  {'resets':>6}")
+    for s in summaries:
+        typer.echo(
+            f"{s.window_id:>6}  {s.start:>8.2f}  {s.frames:>6}  "
+            f"{s.detected_ratio:>7.1%}  {s.resets:>6}"
+        )
+    frames = sum(s.frames for s in summaries)
+    detected = sum(s.detected for s in summaries)
+    ratio = detected / frames if frames else 0.0
+    typer.echo(
+        f"total: {detected}/{frames} frames with a player ({ratio:.1%}); "
+        f"M3 target is at least 95% with the skeleton on the right person (check the video)"
+    )
+    typer.echo(f"wrote {path} and {path.with_suffix('.csv').name}", err=True)
+
+
 @app.command("tune-contacts")
 def tune_contacts(
     session_id: str,

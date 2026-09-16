@@ -8,7 +8,7 @@ The pipeline is a fixed sequence of stages. Each stage reads files from the sess
 |---|-------|--------|---------|-----------------|-----------|
 | 1 | ingest | source video | `metadata.json`, `audio.wav`, `frame_times.parquet` | none | **M1 (done)** |
 | 2 | contacts | `audio.wav`, `metadata.json`, `frame_times.parquet` | `contacts.parquet` | audio | **M2 (done, needs tuning)** |
-| 3 | pose | `contacts.parquet` (and the source video) | `keypoints.parquet` | pose, windows | M3 |
+| 3 | pose | `contacts.parquet`, `frame_times.parquet`, `metadata.json`, source video | `keypoints.parquet` | pose, windows | **M3 (done, pending review)** |
 | 4 | clean | `keypoints.parquet`, `contacts.parquet` | `swings.parquet` | player, cleaning, audio | M4 |
 | 5 | classify | `swings.parquet` | `swings.parquet` | player, classify | M5 |
 | 6 | metrics | `swings.parquet` | `metrics.parquet` | player, metrics | M6 |
@@ -105,6 +105,31 @@ Two things differ from the spec:
 
 - **`min_prominence_db` (default 6 dB).** Detections quieter than this relative to the local background are dropped. Without this rule, the log-flux envelope's heavy tail produces several false detections per minute of plain noise.
 - **The first-pass own-hit rule is kept as specified, but it has a known limit.** It compares each onset to the *median* onset level, so it only works when your own hits are a minority of all onsets. That holds for real sessions (about 450 loud onsets out of about 3,000 in the first one). It fails when there are few other sounds. The second pass (wrist speed, M4) is the real safeguard.
+
+### `keypoints.parquet` (schema_version 1)
+
+The file has one row per decoded frame inside an analysis window, sorted by `frame_idx`.
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `frame_idx`, `t_video` | int64, float64 | Frame index and PTS |
+| `window_id` | int32 | Merged analysis window |
+| `detected` | bool | A player was selected in this frame |
+| `track_reset` | bool | The selection fell back to the first-frame rule because nothing overlapped the previous box enough |
+| `n_persons` | int16 | Number of people the backend found |
+| `bbox_x1`, `bbox_y1`, `bbox_x2`, `bbox_y2`, `bbox_conf` | float32 | Selected player's box, in pixels (NaN when not detected) |
+| `<kp>_x`, `<kp>_y`, `<kp>_conf` | float32 | 17 COCO keypoints (`nose`, `l_eye`, …, `r_ankle`), in pixels; confidence is 0 when not detected |
+
+The Parquet metadata also records `frame_width`, `frame_height`, `backend`, `model`, `device` and `crop_refine`.
+
+How the stage works:
+
+1. **Windows:** it takes `[t − pre_s, t + post_s]` around each selected contact and merges overlapping ranges. Windows less than `seek_gap_s` apart are decoded in one pass instead of seeking again.
+2. **Decoding:** `tennis/util/frames.py` runs `ffmpeg -copyts -ss … -vf showinfo`. ffmpeg writes raw BGR frames, and its `showinfo` output gives each frame's PTS, which is matched to `frame_times.parquet` within 1 ms. ffmpeg applies rotation. PyAV isn't used, because on macOS its bundled FFmpeg clashes with OpenCV's.
+3. **Detection:** the backend finds everyone in each batch of frames.
+4. **Player selection:** `tennis/util/tracking.py` implements the spec's rule. In a window's first frame it picks the largest person whose box bottom is below `near_court_min_y`. After that it picks the highest IoU with the previous selection, and falls back to the first rule, with `track_reset`, when the IoU is below `track_iou_min`. A frame with no detection keeps the previous box.
+5. **Crop refinement:** if the frame is more than 2.5× the model's input size (for example 4K at 640 px), pose runs again on a full-resolution crop around the player, padded by `crop_pad`.
+6. **Model loading:** the model is loaded only when there is at least one window. A decoding failure skips that group of windows with a warning instead of failing the stage.
 
 ### `audio.wav`
 

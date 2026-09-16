@@ -35,7 +35,7 @@ def test_ingest_writes_metadata_and_audio(make_video: MakeVideo, data_root: Path
     video = make_video(seconds=2.0, fps=120)
     session = _session(data_root, video)
     ran = run_pipeline(session, _config(data_root), get_logger())
-    assert ran == ["ingest", "contacts"]
+    assert ran == ["ingest", "contacts", "pose"]
     assert (session.dir / "frame_times.parquet").exists()
 
     meta = json.loads((session.dir / "metadata.json").read_text())
@@ -68,14 +68,14 @@ def test_ingest_is_cached_and_rerun_on_demand(make_video: MakeVideo, data_root: 
     video = make_video()
     session = _session(data_root, video)
     cfg = _config(data_root)
-    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "contacts"]
+    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "contacts", "pose"]
     assert run_pipeline(session, cfg, get_logger()) == []
     assert stage_status(session, STAGES[0], cfg) == "ok"
 
-    both = ["ingest", "contacts"]
+    both = ["ingest", "contacts", "pose"]
     assert run_pipeline(session, cfg, get_logger(), force=True) == both
     assert run_pipeline(session, cfg, get_logger(), from_stage=1) == both
-    assert run_pipeline(session, cfg, get_logger(), from_stage=2) == ["contacts"]
+    assert run_pipeline(session, cfg, get_logger(), from_stage=2) == ["contacts", "pose"]
 
     (session.dir / "audio.wav").unlink()
     assert stage_status(session, STAGES[0], cfg) == "stale"
@@ -89,10 +89,10 @@ def test_ingest_is_cached_and_rerun_on_demand(make_video: MakeVideo, data_root: 
     os.utime(video, (now - 50, now - 50))
     assert run_pipeline(session, cfg, get_logger()) == both
 
-    # Changing an audio option only reruns contacts.
+    # Changing an audio option reruns contacts and, since its output changed, pose.
     louder = cfg.model_copy(update={"audio": cfg.audio.model_copy(update={"onset_k": 9.0})})
     assert stage_status(session, STAGES[1], louder) == "stale"
-    assert run_pipeline(session, louder, get_logger()) == ["contacts"]
+    assert run_pipeline(session, louder, get_logger()) == ["contacts", "pose"]
 
 
 def test_ingest_does_not_touch_source(make_video: MakeVideo, data_root: Path) -> None:
@@ -142,7 +142,11 @@ def test_corrupt_video_fails_ingest(tmp_path: Path, data_root: Path) -> None:
 def test_low_frame_rate_is_processed_with_warning(make_video: MakeVideo, data_root: Path) -> None:
     video = make_video("24fps.mp4", fps=24)
     session = _session(data_root, video)
-    assert run_pipeline(session, _config(data_root), get_logger()) == ["ingest", "contacts"]
+    assert run_pipeline(session, _config(data_root), get_logger()) == [
+        "ingest",
+        "contacts",
+        "pose",
+    ]
     meta = json.loads((session.dir / "metadata.json").read_text())
     assert meta["fps"] == pytest.approx(24)
     assert len(meta["warnings"]) == 1

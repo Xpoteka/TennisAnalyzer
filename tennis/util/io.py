@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -52,11 +52,21 @@ def provenance(stage: str, config_hash: str, schema_version: int) -> dict[str, s
 
 
 def write_parquet(
-    table: pa.Table, path: Path, *, stage: str, config_hash: str, schema_version: int
+    table: pa.Table,
+    path: Path,
+    *,
+    stage: str,
+    config_hash: str,
+    schema_version: int,
+    extra: Mapping[str, str] | None = None,
 ) -> None:
-    """Write ``table`` with pipeline version, config hash and schema version in its metadata."""
+    """Write ``table`` with pipeline version, config hash and schema version in its metadata.
+
+    ``extra`` entries are stored under the same ``tennis.`` prefix.
+    """
     meta = dict(table.schema.metadata or {})
-    for key, value in provenance(stage, config_hash, schema_version).items():
+    entries = {**(extra or {}), **provenance(stage, config_hash, schema_version)}
+    for key, value in entries.items():
         meta[f"{META_PREFIX}{key}".encode()] = value.encode()
     table = table.replace_schema_metadata(meta)
     with atomic_path(path) as tmp:
