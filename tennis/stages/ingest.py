@@ -10,6 +10,7 @@ Time conventions written here and used by later stages:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from tennis import __version__
@@ -23,6 +24,30 @@ if TYPE_CHECKING:
 SCHEMA_VERSION = 1
 AUDIO_SAMPLE_RATE = 48_000
 OUTPUTS = ("metadata.json", "audio.wav")
+
+# Frame rates the pipeline is designed for (spec section 2). Footage outside this range is
+# still processed; timing-dependent results just get less precise, so ingest warns.
+FPS_SUPPORTED_MIN = 30.0
+FPS_SUPPORTED_MAX = 240.0
+
+
+def frame_rate_warnings(fps: float | None) -> list[str]:
+    """Human-readable warnings for a frame rate outside the supported range."""
+    if fps is None:
+        return ["frame rate unknown; timing relies on frame timestamps only"]
+    interval_ms = 1000.0 / fps
+    if fps < FPS_SUPPORTED_MIN:
+        return [
+            f"low frame rate {fps:.2f} fps (supported: {FPS_SUPPORTED_MIN:.0f}-"
+            f"{FPS_SUPPORTED_MAX:.0f}, 100-120 preferred): frames are {interval_ms:.0f} ms apart, "
+            "so contact frames and wrist speeds will be less precise"
+        ]
+    if fps > FPS_SUPPORTED_MAX:
+        return [
+            f"high frame rate {fps:.2f} fps (supported up to {FPS_SUPPORTED_MAX:.0f}): "
+            "pose extraction will be slower than planned"
+        ]
+    return []
 
 
 def build_metadata(
@@ -39,6 +64,7 @@ def build_metadata(
     duration = probe.duration or v.duration or a.duration
     is_vfr = video.is_variable_frame_rate(v, intervals)
     return {
+        "warnings": frame_rate_warnings(v.fps_avg or v.fps_nominal),
         "schema_version": SCHEMA_VERSION,
         "pipeline_version": __version__,
         "config_hash": config_hash,
@@ -107,10 +133,12 @@ def run(ctx: StageContext) -> None:
         "probed",
         duration_s=meta["duration_s"],
         resolution=f"{probe.video.width}x{probe.video.height}",
-        fps=meta["fps"],
+        fps=round(meta["fps"], 3) if meta["fps"] else None,
         vfr=meta["is_vfr"],
         codec=probe.video.codec,
     )
+    for warning in meta["warnings"]:
+        ctx.log(warning, level=logging.WARNING)
 
     wav = ctx.session.path("audio.wav")
     with atomic_path(wav) as tmp:
