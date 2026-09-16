@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from tennis.config import Config
 from tennis.errors import StageError, TennisError, UserError
 from tennis.session import SOURCE_INPUT, Session
-from tennis.stages import contacts, ingest
+from tennis.stages import contacts, ingest, pose
 from tennis.util.log import log, session_log
 
 
@@ -57,7 +57,7 @@ class Stage:
 STAGES: tuple[Stage, ...] = (
     Stage(1, "ingest", (SOURCE_INPUT,), ingest.OUTPUTS, (), "M1", ingest.run),
     Stage(2, "contacts", contacts.INPUTS, contacts.OUTPUTS, ("audio",), "M2", contacts.run),
-    Stage(3, "pose", ("contacts.parquet",), ("keypoints.parquet",), ("pose", "windows"), "M3"),
+    Stage(3, "pose", pose.INPUTS, pose.OUTPUTS, ("pose", "windows"), "M3", pose.run),
     Stage(
         4,
         "clean",

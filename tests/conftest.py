@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is 
 needs_ffmpeg = pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg/ffprobe not installed")
 
 MakeVideo = Callable[..., Path]
+COUNTER_PERIOD = 110  # keeps the counter pattern's luma within 16..235
 
 
 def _ffmpeg(*args: str) -> None:
@@ -32,13 +33,24 @@ def make_video(tmp_path_factory: pytest.TempPathFactory) -> MakeVideo:
         vfr: bool = False,
         creation_time: str | None = "2026-09-20T18:30:00Z",
         audio_wav: Path | None = None,
+        counter: bool = False,
     ) -> Path:
-        """``audio_wav`` replaces the default 1 kHz tone with the given WAV file."""
-        key = (name, seconds, fps, audio, vfr, creation_time, audio_wav)
+        """Synthetic clip.
+
+        ``audio_wav`` replaces the default 1 kHz tone with the given WAV file. ``counter``
+        makes a small grey video whose brightness encodes the source frame number n
+        modulo ``COUNTER_PERIOD`` (luma 16 + 2 (n mod 110), see ``frame_number``).
+        """
+        key = (name, seconds, fps, audio, vfr, creation_time, audio_wav, counter)
         if key in cache:
             return cache[key]
         out = root / name
-        args = ["-f", "lavfi", "-i", f"testsrc2=size=320x240:rate={fps}:duration={seconds}"]
+        if counter:
+            lum = f"16+2*mod(N\\,{COUNTER_PERIOD})"
+            source = f"nullsrc=s=64x48:r={fps}:d={seconds},geq=lum='{lum}':cb=128:cr=128"
+        else:
+            source = f"testsrc2=size=320x240:rate={fps}:duration={seconds}"
+        args = ["-f", "lavfi", "-i", source]
         if audio_wav is not None:
             args += ["-i", str(audio_wav), "-map", "0:v", "-map", "1:a", "-shortest"]
             args += ["-ac", "2", "-c:a", "aac", "-b:a", "256k"]
@@ -62,6 +74,37 @@ def make_video(tmp_path_factory: pytest.TempPathFactory) -> MakeVideo:
         return out
 
     return make
+
+
+def frame_number(image: object) -> int:
+    """Inverse of the ``counter`` video pattern: source frame number mod COUNTER_PERIOD."""
+    import numpy as np
+
+    mean = float(np.asarray(image).mean())
+    return round((mean * 219 / 255) / 2)
+
+
+class _NoPeopleBackend:
+    name = "yolo"
+
+    def infer(self, frames: list[object]) -> list[list[object]]:
+        return [[] for _ in frames]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_pose_model(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Tests never load or download YOLO unless marked ``real_yolo``."""
+    from tennis import pose_backends
+
+    if request.node.get_closest_marker("real_yolo"):
+        yield
+        return
+    original = pose_backends._REGISTRY["yolo"]
+    pose_backends.register_backend("yolo", lambda cfg, path, device: _NoPeopleBackend())  # type: ignore[arg-type,return-value]
+    try:
+        yield
+    finally:
+        pose_backends.register_backend("yolo", original)
 
 
 @pytest.fixture

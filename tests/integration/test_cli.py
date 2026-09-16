@@ -91,7 +91,7 @@ def test_process_then_list(
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0, err
     assert "session 2026-09-20_" in err
-    assert "done: ingest, contacts" in err
+    assert "done: ingest, contacts, pose" in err
 
     sessions = list((config_file.parent / "data" / "sessions").iterdir())
     assert len(sessions) == 1
@@ -101,14 +101,14 @@ def test_process_then_list(
     assert code == 0
     header, row = out.strip().splitlines()
     assert header.split()[:3] == ["session", "ingest", "contacts"]
-    assert row.split()[1:4] == ["ok", "ok", "n/a"]
+    assert row.split()[1:5] == ["ok", "ok", "ok", "n/a"]
 
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0
     assert "everything up to date" in err
 
     code, _, err = _run(
-        ["process", str(video), "--config", str(config_file), "--from-stage", "3"], capsys
+        ["process", str(video), "--config", str(config_file), "--from-stage", "4"], capsys
     )
     assert code == 1
     assert "not implemented yet" in err

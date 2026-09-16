@@ -46,14 +46,20 @@ class AudioConfig(_Section):
 
 
 class PoseConfig(_Section):
-    backend: Literal["yolo", "mediapipe"] = "yolo"
+    backend: str = Field("yolo", min_length=1)  # checked against the backend registry
     model: str = "yolo11m-pose.pt"
-    device: Literal["auto", "cuda", "cpu"] = "auto"
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     batch_size: int = Field(16, ge=1)
+    imgsz: int = Field(640, ge=32)
+    min_person_conf: float = Field(0.25, ge=0, le=1)
     kp_conf_min: float = Field(0.3, ge=0, le=1)
+    contacts: Literal["self_audio", "all"] = "self_audio"
     near_court_min_y: float = Field(0.4, ge=0, le=1)
     track_iou_min: float = Field(0.3, ge=0, le=1)
+    crop_refine: Literal["auto", "always", "never"] = "auto"
     crop_pad: float = Field(0.2, ge=0)
+    seek_gap_s: float = Field(3.0, ge=0)
+    hwaccel: str | None = None
 
 
 class WindowsConfig(_Section):

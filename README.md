@@ -2,7 +2,7 @@
 
 A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
-**Status: milestone M2.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, and **contact detection** with its tuning tool. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
+**Status: milestone M3.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, and **pose extraction** with a review video. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
 
 ## Setup
 
@@ -24,6 +24,7 @@ Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` dire
 - Record the clip-on microphone **into the camera file**. Ingest fails if the video has no audio track.
 - Keep yourself the largest person on the near side of the court. A hitting partner on the far side is fine.
 - Keep the camera clock correct. Session IDs come from the video's creation timestamp.
+- Keep the video files stored locally. iCloud's "Optimize Mac Storage" can remove the local copy, and reading such a file then stalls while iCloud downloads it again.
 - Leave the raw files where they are. The pipeline never copies or changes them; each session only holds a symlink to the file.
 
 ## CLI
@@ -49,6 +50,21 @@ tennis inspect <session-id> <swing-id>    # M6
 - **Config:** the CLI reads `--config`, or `./config.yaml` if it exists; otherwise it uses the defaults. Unknown keys are rejected. A relative `paths.data_root` is resolved from the config file's directory.
 
 Every run appends JSON lines to `data/sessions/<id>/pipeline.log`.
+
+### Pose extraction
+
+- **When it runs:** the pose stage processes only the frames around contacts (`windows.pre_s` / `windows.post_s`).
+- **Which contacts:** by default, only those flagged as your own hits by the first audio pass. When the mic isn't on you, as with a court camera, set `pose.contacts: all`.
+- **Model and device:** the model is downloaded to `data/models/` on first use. `pose.device: auto` uses an NVIDIA GPU, then the Apple GPU, then the CPU.
+- **Speed:** on an Apple M-series Mac, `yolo11m-pose` at 640 px runs at about 28 frames/s on 720p video.
+
+Check the tracking with a review video of 20 random swings. It has the skeleton drawn in (racket side in orange), a red border on contact frames, and a warning on frames with no player:
+
+```bash
+uv run tennis pose-preview <session-id> --count 20 --speed 0.5
+```
+
+It writes `data/sessions/<id>/debug/pose_preview.mp4`, plus a CSV of the tracked frame ratio and track resets per swing.
 
 ### Tuning contact detection
 
@@ -92,6 +108,16 @@ CI (`.github/workflows/ci.yml`) runs the same checks on Ubuntu.
 3. In the `STAGES` registry in `tennis/stages/__init__.py`, set `run=` on the stage's entry, and check its inputs, outputs and config sections.
 4. Log with `ctx.log(event, **fields)`. When one swing is bad, log it, mark it and continue. Do not raise for it.
 
-### Adding a metric or pose backend
+### Adding a pose backend
 
-These arrive with M6 and M3. Metrics will be registered functions (`@metric(name, applies_to)`) in `tennis/stages/metrics.py`. Pose backends will implement the `PoseBackend` protocol in `tennis/pose_backends/base.py`.
+1. Implement the `PoseBackend` protocol from `tennis/pose_backends/base.py`. It has a `name` and an `infer(frames) -> list[list[PersonPose]]` method that takes BGR images and returns COCO-17 keypoints in pixels.
+2. Register a factory in `tennis/pose_backends/__init__.py` with `register_backend("name", factory)`.
+3. Select it with `pose.backend: name`.
+
+No other stage needs to change.
+
+**License note:** the built-in `yolo` backend uses Ultralytics, which is AGPL-3.0. That's fine for personal use. Before distributing this software, switch to a differently licensed backend and remove `ultralytics` from the dependencies.
+
+### Adding a metric
+
+This arrives with M6. Metrics will be registered functions (`@metric(name, applies_to)`) in `tennis/stages/metrics.py`.
