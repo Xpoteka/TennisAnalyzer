@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "pyarrow>=16.0",
+    "librosa>=0.11.0",
+    "scipy>=1.17.1",
+    "numpy>=2.4.6",
 ]
 
 [project.scripts]
@@ -43,7 +46,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["pyarrow", "pyarrow.*", "scipy", "scipy.*", "librosa", "librosa.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

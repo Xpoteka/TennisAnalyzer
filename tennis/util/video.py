@@ -6,17 +6,18 @@ never from ``frame_index / fps``, because the footage may have a variable frame 
 
 from __future__ import annotations
 
-import itertools
 import json
 import os
 import shutil
-import statistics
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+import numpy.typing as npt
 
 from tennis.errors import UserError
 
@@ -189,7 +190,7 @@ def file_creation_time(path: Path) -> datetime:
 
 @dataclass(frozen=True)
 class FrameIntervals:
-    sampled_frames: int
+    frames: int
     median_ms: float
     p01_ms: float
     p99_ms: float
@@ -199,36 +200,58 @@ class FrameIntervals:
         return (self.p99_ms - self.p01_ms) / self.median_ms if self.median_ms > 0 else 0.0
 
 
-def _percentile(sorted_values: list[float], q: float) -> float:
-    idx = min(len(sorted_values) - 1, max(0, round(q * (len(sorted_values) - 1))))
-    return sorted_values[idx]
+def read_frame_pts(path: Path, stream_index: int) -> npt.NDArray[np.float64]:
+    """Presentation timestamps (seconds) of every frame of a video stream, sorted.
 
-
-def sample_frame_intervals(path: Path, stream_index: int, seconds: float = 30.0) -> FrameIntervals:
-    """Measure PTS spacing over the first ``seconds`` of a video stream (packet-level, fast)."""
+    Reads packet headers only, so it is fast even for multi-GB files. Packets flagged as
+    discarded (``D``, e.g. before an edit-list start) never become frames and are skipped.
+    Frame index ``i`` everywhere in the pipeline means the ``i``-th element of this array.
+    """
     exe = require_tool("ffprobe")
     out = _run(
         [
             exe, "-v", "error",
             "-select_streams", str(stream_index),
-            "-read_intervals", f"%+{seconds}",
-            "-show_entries", "packet=pts_time",
+            "-show_entries", "packet=pts_time,flags",
             "-of", "csv=p=0",
             str(path),
         ]
     )  # fmt: skip
-    pts = sorted(
-        v for v in (_float(line.strip().rstrip(",")) for line in out.splitlines()) if v is not None
-    )
-    deltas = sorted(b - a for a, b in itertools.pairwise(pts) if b > a)
-    if not deltas:
-        return FrameIntervals(sampled_frames=len(pts), median_ms=0.0, p01_ms=0.0, p99_ms=0.0)
+    values = []
+    for line in out.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2 or "D" in parts[1]:
+            continue
+        pts = _float(parts[0])
+        if pts is not None:
+            values.append(pts)
+    return np.unique(np.asarray(values, dtype=np.float64))
+
+
+def frame_intervals(pts: npt.NDArray[np.float64]) -> FrameIntervals:
+    """Spacing statistics of sorted frame timestamps."""
+    deltas = np.diff(pts)
+    deltas = deltas[deltas > 0]
+    if deltas.size == 0:
+        return FrameIntervals(frames=int(pts.size), median_ms=0.0, p01_ms=0.0, p99_ms=0.0)
+    p01, med, p99 = np.percentile(deltas, [1, 50, 99], method="nearest") * 1000
     return FrameIntervals(
-        sampled_frames=len(pts),
-        median_ms=statistics.median(deltas) * 1000,
-        p01_ms=_percentile(deltas, 0.01) * 1000,
-        p99_ms=_percentile(deltas, 0.99) * 1000,
+        frames=int(pts.size), median_ms=float(med), p01_ms=float(p01), p99_ms=float(p99)
     )
+
+
+def nearest_frames(
+    pts: npt.NDArray[np.float64], times: npt.NDArray[np.float64]
+) -> npt.NDArray[np.int64]:
+    """Index of the frame whose PTS is closest to each time (ties go to the earlier frame)."""
+    if pts.size == 0:
+        raise ValueError("no frame timestamps")
+    if pts.size == 1:
+        return np.zeros(times.shape, dtype=np.int64)
+    right = np.clip(np.searchsorted(pts, times, side="left"), 1, pts.size - 1)
+    left = right - 1
+    choose_right = np.abs(pts[right] - times) < np.abs(times - pts[left])
+    return np.where(choose_right, right, left).astype(np.int64)
 
 
 def is_variable_frame_rate(stream: VideoStream, intervals: FrameIntervals) -> bool:

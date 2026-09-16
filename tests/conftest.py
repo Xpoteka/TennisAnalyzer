@@ -31,13 +31,18 @@ def make_video(tmp_path_factory: pytest.TempPathFactory) -> MakeVideo:
         audio: bool = True,
         vfr: bool = False,
         creation_time: str | None = "2026-09-20T18:30:00Z",
+        audio_wav: Path | None = None,
     ) -> Path:
-        key = (name, seconds, fps, audio, vfr, creation_time)
+        """``audio_wav`` replaces the default 1 kHz tone with the given WAV file."""
+        key = (name, seconds, fps, audio, vfr, creation_time, audio_wav)
         if key in cache:
             return cache[key]
         out = root / name
         args = ["-f", "lavfi", "-i", f"testsrc2=size=320x240:rate={fps}:duration={seconds}"]
-        if audio:
+        if audio_wav is not None:
+            args += ["-i", str(audio_wav), "-map", "0:v", "-map", "1:a", "-shortest"]
+            args += ["-ac", "2", "-c:a", "aac", "-b:a", "256k"]
+        elif audio:
             args += [
                 "-f",
                 "lavfi",

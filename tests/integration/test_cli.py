@@ -91,7 +91,7 @@ def test_process_then_list(
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0, err
     assert "session 2026-09-20_" in err
-    assert "done: ingest" in err
+    assert "done: ingest, contacts" in err
 
     sessions = list((config_file.parent / "data" / "sessions").iterdir())
     assert len(sessions) == 1
@@ -101,7 +101,7 @@ def test_process_then_list(
     assert code == 0
     header, row = out.strip().splitlines()
     assert header.split()[:3] == ["session", "ingest", "contacts"]
-    assert row.split()[1:3] == ["ok", "n/a"]
+    assert row.split()[1:4] == ["ok", "ok", "n/a"]
 
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0

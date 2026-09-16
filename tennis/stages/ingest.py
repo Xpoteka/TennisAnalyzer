@@ -13,17 +13,21 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+import pyarrow as pa
+
 from tennis import __version__
 from tennis.errors import UserError
 from tennis.util import video
-from tennis.util.io import atomic_path, write_json
+from tennis.util.io import atomic_path, write_json, write_parquet
 
 if TYPE_CHECKING:
     from tennis.stages import StageContext
 
 SCHEMA_VERSION = 1
 AUDIO_SAMPLE_RATE = 48_000
-OUTPUTS = ("metadata.json", "audio.wav")
+OUTPUTS = ("metadata.json", "audio.wav", "frame_times.parquet")
+FRAME_TIMES_SCHEMA_VERSION = 1
 
 # Frame rates the pipeline is designed for (spec section 2). Footage outside this range is
 # still processed; timing-dependent results just get less precise, so ingest warns.
@@ -85,7 +89,7 @@ def build_metadata(
             "fps_avg": v.fps_avg,
             "is_vfr": is_vfr,
             "frame_interval_ms": {
-                "sampled_frames": intervals.sampled_frames,
+                "frames": intervals.frames,
                 "median": round(intervals.median_ms, 4),
                 "p01": round(intervals.p01_ms, 4),
                 "p99": round(intervals.p99_ms, 4),
@@ -127,7 +131,10 @@ def run(ctx: StageContext) -> None:
     if probe.audio.sample_rate <= 0 or probe.audio.channels <= 0:
         raise UserError(f"{src.name}: audio stream {probe.audio.index} has no usable samples")
 
-    intervals = video.sample_frame_intervals(src, probe.video.index)
+    pts = video.read_frame_pts(src, probe.video.index)
+    if pts.size == 0:
+        raise UserError(f"{src.name}: video stream {probe.video.index} has no frames")
+    intervals = video.frame_intervals(pts)
     meta = build_metadata(probe, intervals, ctx.config_hash)
     ctx.log(
         "probed",
@@ -139,6 +146,20 @@ def run(ctx: StageContext) -> None:
     )
     for warning in meta["warnings"]:
         ctx.log(warning, level=logging.WARNING)
+
+    write_parquet(
+        pa.table(
+            {
+                "frame_idx": pa.array(np.arange(pts.size, dtype=np.int64)),
+                "pts": pa.array(pts),
+            }
+        ),
+        ctx.session.path("frame_times.parquet"),
+        stage=ctx.stage,
+        config_hash=ctx.config_hash,
+        schema_version=FRAME_TIMES_SCHEMA_VERSION,
+    )
+    ctx.log("frame times read", frames=int(pts.size))
 
     wav = ctx.session.path("audio.wav")
     with atomic_path(wav) as tmp:

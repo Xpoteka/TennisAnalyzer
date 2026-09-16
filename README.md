@@ -2,7 +2,7 @@
 
 A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
-**Status: milestone M1.** Built so far: the scaffold, config, CLI, stage caching and the **ingest** stage. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
+**Status: milestone M2.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, and **contact detection** with its tuning tool. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
 
 ## Setup
 
@@ -33,7 +33,7 @@ tennis process <video> [--session-id ID] [--config PATH] [--force] [--from-stage
 tennis list                               # sessions and the status of each stage
 tennis report <session-id>                # M7
 tennis trends [--since DATE]              # M7
-tennis tune-contacts <session-id> --labels PATH    # M2
+tennis tune-contacts <session-id> --labels PATH [--k ...] [--cutoff ...] [--db ...] [--report PATH]
 tennis eval-classifier <session-id> --labels PATH  # M5
 tennis inspect <session-id> <swing-id>    # M6
 ```
@@ -49,6 +49,29 @@ tennis inspect <session-id> <swing-id>    # M6
 - **Config:** the CLI reads `--config`, or `./config.yaml` if it exists; otherwise it uses the defaults. Unknown keys are rejected. A relative `paths.data_root` is resolved from the config file's directory.
 
 Every run appends JSON lines to `data/sessions/<id>/pipeline.log`.
+
+### Tuning contact detection
+
+Contact detection needs tuning against your own labeled hits. The spec's default settings count far too many sounds as your hits.
+
+1. Pick a stretch of about 5–10 minutes of rallying. Write down the time of **every one of your own hits** in it, as the video player shows it: `83.4` or `1:23.4`. Don't include your partner's hits, bounces or footsteps. See [labels/README.md](labels/README.md) for the file format.
+2. Save the times as `labels/contacts_<session-id>.csv`.
+3. Run the tuning tool:
+
+   ```bash
+   uv run tennis tune-contacts 2026-09-16_evening --labels labels/contacts_2026-09-16_evening.csv \
+     --report docs/validation/M2_contacts.md
+   ```
+
+   It prints the precision and recall of every combination of `onset_k`, `highpass_hz` and `own_hit_db_threshold`. Only detections inside the labeled stretch count. It also prints a suggested `audio:` config block. Copy that block into `config.yaml`, then run `tennis process` again; only the contacts stage reruns.
+
+**Coarse or external labels.** If the times come from another system, for example Wingfield's whole-second shot log, describe their precision and clock offset with `--label-resolution 1 --label-offset 1`. Then restrict scoring to rallies with `--segments rallies.csv` (`start,end` rows, on the labels' clock). Use `--target any` when the labels include both players' shots. `scripts/wingfield_labels.py` converts a Wingfield `.xlsx` export into these files:
+
+```bash
+uv run scripts/wingfield_labels.py ~/Downloads/<export>.xlsx <session-id>
+```
+
+In the output, `recall_any` is the recall you'd get if every detected sound counted as your hit. If `recall_any` is low, the detector itself is missing hits. If it's high but `recall` is low, the loudness rule is the problem.
 
 > **YAML gotcha:** quote `"yes"`, `"no"`, `"on"` and `"off"` in the label vocabulary. Unquoted, YAML reads them as booleans and config validation fails.
 

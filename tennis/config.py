@@ -40,6 +40,7 @@ class AudioConfig(_Section):
     min_separation_s: float = Field(0.25, gt=0)
     threshold_window_s: float = Field(5.0, gt=0)
     amplitude_window_s: float = Field(0.02, gt=0)
+    min_prominence_db: float = Field(6.0, ge=0)
     own_hit_db_threshold: float = 6.0
     wrist_confirm_window_s: float = Field(0.15, gt=0)
 

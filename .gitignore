@@ -19,3 +19,6 @@ build/
 .idea/
 .vscode/
 .claude/settings.local.json
+
+# Hand-made and imported labels (personal session data)
+/labels/*.csv
