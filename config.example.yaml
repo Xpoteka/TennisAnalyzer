@@ -1,0 +1,88 @@
+# Tennis Technique Analyzer configuration.
+# Copy to config.yaml (picked up automatically from the working directory) or pass --config.
+# Every key is optional; the values below are the defaults. Unknown keys are rejected.
+# Changing a section only reruns the stages that depend on it.
+
+player:
+  handedness: right          # right | left. "Racket side" joints follow this.
+  camera_side: behind_baseline   # behind_baseline | side_on
+  forward_sign: +1           # +1 | -1. Flips contact_forward if the camera setup is mirrored.
+
+paths:
+  data_root: ./data          # Sessions live in <data_root>/sessions/<id>/.
+                             # A relative path is resolved against this file's directory.
+
+audio:                       # Stage 2: contact detection
+  highpass_hz: 800           # High-pass Butterworth cutoff before onset detection (Hz).
+  highpass_order: 4          # Butterworth filter order.
+  onset_k: 6.0               # Peak threshold = median + k * MAD of the onset envelope.
+  threshold_window_s: 5.0    # Sliding window for the adaptive threshold (s).
+  min_separation_s: 0.25     # Minimum time between two contacts (s).
+  amplitude_window_s: 0.02   # Half-width of the window for peak RMS amplitude (s).
+  own_hit_db_threshold: 6.0  # A contact is "self" if this many dB above the session median.
+  wrist_confirm_window_s: 0.15   # Wrist-speed peak must be this close to the onset (s).
+
+pose:                        # Stage 3: pose extraction
+  backend: yolo              # yolo | mediapipe
+  model: yolo11m-pose.pt     # Weights file for the backend.
+  device: auto               # auto | cuda | cpu. auto uses CUDA when available.
+  batch_size: 16             # Frames per inference batch.
+  kp_conf_min: 0.3           # Keypoints below this confidence are dropped (set to NaN).
+  near_court_min_y: 0.4      # Player's box bottom must be below this image-height fraction
+                             # (0.4 = the lower 60% of the image).
+  track_iou_min: 0.3         # Below this IoU with the previous box, the track resets.
+  crop_pad: 0.2              # Padding around the person box when the backend needs a crop.
+
+windows:                     # Frames analysed around each contact
+  pre_s: 1.0                 # Seconds before contact.
+  post_s: 0.5                # Seconds after contact.
+
+cleaning:                    # Stage 4: cleaning and normalization
+  smoother: one_euro         # one_euro | savgol
+  one_euro:
+    min_cutoff: 1.0          # Lower = smoother at low speed, more lag.
+    beta: 0.05               # Higher = less lag at high speed.
+    d_cutoff: 1.0            # Cutoff for the derivative estimate.
+  savgol:
+    window: 9                # Odd number of frames.
+    order: 3                 # Polynomial order, smaller than window.
+  max_gap_frames: 5          # NaN gaps up to this length are interpolated.
+  swap_improvement_ratio: 0.3    # Swap left/right if it cuts displacement by more than this.
+  qc:
+    min_valid_frame_ratio: 0.8   # Swings with fewer valid frames fail QC.
+    max_track_resets: 2          # Swings with more player-track resets fail QC.
+
+classify:                    # Stage 5: stroke classification (normalized units)
+  serve_wrist_above_nose: 0.3    # Racket wrist this far above the nose at contact = serve.
+  volley_travel_max: 0.8         # Max pre-contact racket wrist travel for a volley.
+  volley_bbox_bottom_max_y: 0.55 # Player box bottom above this image-height fraction = at net.
+  two_handed_max_dist: 0.25      # Wrists closer than this at contact = two-handed backhand.
+
+metrics:                     # Stage 6
+  outlier_metrics: [contact_height, contact_forward, elbow_angle_contact, knee_flex_min, peak_speed_offset]
+  outlier_percentile: 95     # Swings above this Mahalanobis-distance percentile are outliers.
+
+clips:                       # Stage 8
+  pre_s: 1.2                 # Seconds before contact.
+  post_s: 0.8                # Seconds after contact.
+  height: 720                # Output height in pixels (H.264 MP4).
+  slow_motion: false         # Also render slow-motion playback.
+  slow_motion_rate: 0.25     # Playback speed for slow motion.
+  max_per_label: 10          # Cap on clips per voice label.
+
+report:                      # Stage 9
+  trend_metrics: [contact_height, contact_forward, knee_flex_min, unit_turn_lead_time]
+  rolling_sessions: 5        # Deltas compare against the mean of this many past sessions.
+
+labels:                      # Stage 7: voice labels (optional)
+  enabled: true              # Also skippable per run with --no-labels.
+  whisper_model: small       # faster-whisper model size.
+  language: en
+  max_delay_s: 3.0           # A label word applies to the last own contact up to this long before.
+  vocabulary:                # label: [spoken words]. A word may map to only one label.
+    good: [good, nice, "yes"]    # quoted: bare yes is a boolean in YAML 1.1
+    late: [late]
+    early: [early]
+    framed: [frame, framed, shank]
+    net: [net]
+    long: [long, out]
