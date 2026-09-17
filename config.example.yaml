@@ -89,6 +89,9 @@ classify:                    # Stage 5: stroke classification (normalized units)
 metrics:                     # Stage 6
   outlier_metrics: [contact_height, contact_forward, elbow_angle_contact, knee_flex_min, peak_speed_offset]
   outlier_percentile: 95     # Swings above this Mahalanobis-distance percentile are outliers.
+  unit_turn_ratio: 0.85      # Shoulders this narrow (vs 1 s before contact) count as turned.
+  outlier_ridge: 1.0e-6      # Ridge added to the covariance before inverting it.
+  min_swings_for_covariance: 10  # Fewer swings of a stroke type: standardized Euclidean instead.
 
 clips:                       # Stage 8
   pre_s: 1.2                 # Seconds before contact.

@@ -1,13 +1,18 @@
-"""Pose review video: sampled windows with the skeleton drawn, for the M3 acceptance check.
+"""Review tools: the pose preview video, the swing plots, the player sheet and ``inspect``.
 
 The M3 criterion is reviewed by eye: the skeleton must follow the player through at least
-95% of the frames of 20 sampled swings. This module renders those swings into one video
-and writes a per-window summary (frames, detected ratio, track resets).
+95% of the frames of 20 sampled swings. ``render_pose_preview`` renders those swings into
+one video and writes a per-window summary (frames, detected ratio, track resets).
+``format_swing_inspection`` backs ``tennis inspect``: one swing's metrics next to the
+session's median for that stroke type, and the path of its clip.
 """
 
 from __future__ import annotations
 
 import csv
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -302,3 +307,66 @@ def render_players(
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), np.vstack(rows_img))
     return out, players
+
+
+def open_file(path: Path) -> None:
+    """Open a file in the desktop's default application (``open`` / ``xdg-open``)."""
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    if shutil.which(opener) is None:
+        raise UserError(f"cannot open {path}: '{opener}' is not on PATH")
+    subprocess.run([opener, str(path)], check=False)
+
+
+def format_swing_inspection(
+    session: Session, config: Config, swing_id: int
+) -> tuple[str, Path | None]:
+    """One swing's metrics beside the session's median for that stroke type, and its clip."""
+    from tennis.stages.metrics import REGISTRY, read_metrics
+
+    rows = read_metrics(session)
+    row = next((r for r in rows if int(r["swing_id"]) == swing_id), None)
+    if row is None:
+        known = ", ".join(str(r["swing_id"]) for r in rows[:20]) or "none"
+        raise UserError(
+            f"session '{session.id}' has no measured swing {swing_id} "
+            f"(measured swing ids: {known}{'...' if len(rows) > 20 else ''})"
+        )
+    stroke_type = str(row["stroke_type"])
+    peers = [r for r in rows if r["stroke_type"] == stroke_type]
+
+    lines = [
+        f"swing {swing_id}  contact {row['contact_id']}  t={float(row['t_contact']):.2f}s  "
+        f"{stroke_type}{' (two-handed)' if row.get('two_handed') else ''}",
+        f"outlier score {_number(row['outlier_score'])}"
+        + ("  OUTLIER" if row.get("is_outlier") else "")
+        + f"  (compared with {len(peers)} {stroke_type} swing(s) this session)",
+        "",
+    ]
+    header = ("metric", "value", "unit", f"median {stroke_type}", "delta")
+    table = [list(header)]
+    for name, meta in REGISTRY.items():
+        value = float(row[name])
+        if not np.isfinite(value):
+            continue
+        others = np.array(
+            [float(r[name]) for r in peers if np.isfinite(float(r[name]))], dtype=np.float64
+        )
+        median = float(np.median(others)) if others.size else float("nan")
+        delta = value - median
+        shown = f"{delta:+.2f}" if np.isfinite(delta) else "-"
+        table.append([name, _number(value), meta.unit, _number(median), shown])
+    widths = [max(len(r[i]) for r in table) for i in range(len(header))]
+    for i, r in enumerate(table):
+        cells = [c.ljust(w) if j == 0 else c.rjust(w)
+                 for j, (c, w) in enumerate(zip(r, widths, strict=True))]  # fmt: skip
+        lines.append("  ".join(cells))
+        if i == 0:
+            lines.append("  ".join("-" * w for w in widths))
+
+    clip = session.dir / "clips" / f"{swing_id}.mp4"
+    return "\n".join(lines), clip if clip.exists() else None
+
+
+def _number(value: Any) -> str:
+    number = float(value) if value is not None else float("nan")
+    return f"{number:.2f}" if np.isfinite(number) else "-"

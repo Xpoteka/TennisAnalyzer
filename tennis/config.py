@@ -141,6 +141,12 @@ class MetricsConfig(_Section):
         ]
     )
     outlier_percentile: float = Field(95.0, gt=0, lt=100)
+    # Shoulder width this fraction of its width 1 s before contact counts as turned.
+    unit_turn_ratio: float = Field(0.85, gt=0, le=1)
+    # Ridge added to the covariance before inversion, as a fraction of its mean variance.
+    outlier_ridge: float = Field(1e-6, ge=0)
+    # Below this many swings of a stroke type, standardized Euclidean distance is used.
+    min_swings_for_covariance: int = Field(10, ge=2)
 
 
 class ClipsConfig(_Section):

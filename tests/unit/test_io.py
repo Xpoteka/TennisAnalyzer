@@ -45,3 +45,19 @@ def test_rewriting_identical_data_keeps_mtime(tmp_path: Path) -> None:
     assert read_parquet_provenance(path)["config_hash"] == "b"
     write_parquet(pa.table({"x": [1, 3]}), path, stage="s", config_hash="b", schema_version=1)
     assert path.stat().st_mtime_ns > 1_000_000_000
+
+
+def test_rewriting_a_table_full_of_nan_keeps_mtime(tmp_path: Path) -> None:
+    """NaN == NaN here; otherwise stages 4 and 6 would invalidate their successors always."""
+    import os
+
+    path = tmp_path / "m.parquet"
+    table = pa.table({"m": [float("nan"), 1.0], "n": pa.array([None, 2.0], pa.float64())})
+    write_parquet(table, path, stage="metrics", config_hash="a", schema_version=1)
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    write_parquet(table, path, stage="metrics", config_hash="a", schema_version=1)
+    assert path.stat().st_mtime_ns == 1_000_000_000
+    # A null is still not the same as a NaN.
+    swapped = pa.table({"m": [float("nan"), 1.0], "n": [float("nan"), 2.0]})
+    write_parquet(swapped, path, stage="metrics", config_hash="a", schema_version=1)
+    assert path.stat().st_mtime_ns > 1_000_000_000

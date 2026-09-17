@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -96,10 +97,35 @@ def _mtime_if_same_data(path: Path, table: pa.Table) -> tuple[int, int] | None:
         old = pq.read_table(path)
     except (OSError, ValueError):
         return None
-    if not old.schema.equals(table.schema, check_metadata=False) or not old.equals(table):
+    if not same_data(old, table):
         return None
     st = path.stat()
     return (st.st_atime_ns, st.st_mtime_ns)
+
+
+def same_data(old: pa.Table, new: pa.Table) -> bool:
+    """Whether two tables hold the same values, ignoring their metadata.
+
+    This is ``Table.equals`` with one change: two NaNs in a float column count as equal.
+    Arrow follows IEEE 754, where they do not, but a metric that could not be computed is
+    the same result on the next run, and treating it as a change would make every stage
+    that writes NaN (stage 4 and stage 6) invalidate its successors on every rerun.
+    """
+    if not old.schema.equals(new.schema, check_metadata=False):
+        return False
+    if old.num_rows != new.num_rows:
+        return False
+    for field in new.schema:
+        a, b = old.column(field.name), new.column(field.name)
+        if a.equals(b):
+            continue
+        if not pa.types.is_floating(field.type) or a.null_count != b.null_count:
+            return False
+        left = np.asarray(a.to_numpy(zero_copy_only=False), dtype=np.float64)
+        right = np.asarray(b.to_numpy(zero_copy_only=False), dtype=np.float64)
+        if not np.array_equal(left, right, equal_nan=True):
+            return False
+    return True
 
 
 def read_parquet_provenance(path: Path) -> dict[str, str]:

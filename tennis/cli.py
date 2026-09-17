@@ -433,10 +433,28 @@ def eval_classifier(
 
 
 @app.command()
-def inspect(session_id: str, swing_id: int, config: ConfigOpt = None) -> None:
+def inspect(
+    session_id: str,
+    swing_id: int,
+    config: ConfigOpt = None,
+    open_clip: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the swing's clip in a player.")
+    ] = True,
+) -> None:
     """Print a swing's metrics and open its clip."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("inspect", "M6")
+    from tennis.review import format_swing_inspection, open_file
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    text, clip = format_swing_inspection(session, cfg, swing_id)
+    typer.echo(text)
+    if clip is None:
+        typer.echo("no clip for this swing; run 'tennis report' to render one", err=True)
+    elif open_clip:
+        open_file(clip)
+        typer.echo(f"opened {clip}", err=True)
+    else:
+        typer.echo(f"clip: {clip}", err=True)
 
 
 def main(argv: list[str] | None = None) -> NoReturn:
