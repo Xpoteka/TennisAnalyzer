@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from tennis.config import Config
 from tennis.errors import StageError, TennisError, UserError
 from tennis.session import SOURCE_INPUT, Session
-from tennis.stages import contacts, ingest, pose
+from tennis.stages import clean, contacts, ingest, pose
 from tennis.util.log import log, session_log
 
 
@@ -41,7 +41,7 @@ class Stage:
     name: str
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
-    config_sections: tuple[str, ...]
+    config_keys: tuple[str, ...]
     milestone: str
     run: StageFn | None = None
     optional: bool = False
@@ -51,20 +51,23 @@ class Stage:
         return self.run is not None
 
     def config_hash(self, config: Config) -> str:
-        return config.section_hash(*self.config_sections)
+        return config.section_hash(*self.config_keys)
 
 
 STAGES: tuple[Stage, ...] = (
     Stage(1, "ingest", (SOURCE_INPUT,), ingest.OUTPUTS, (), "M1", ingest.run),
-    Stage(2, "contacts", contacts.INPUTS, contacts.OUTPUTS, ("audio",), "M2", contacts.run),
+    Stage(
+        2, "contacts", contacts.INPUTS, contacts.OUTPUTS, contacts.CONFIG_KEYS, "M2", contacts.run
+    ),
     Stage(3, "pose", pose.INPUTS, pose.OUTPUTS, ("pose", "windows"), "M3", pose.run),
     Stage(
         4,
         "clean",
-        ("keypoints.parquet", "contacts.parquet"),
-        ("swings.parquet",),
-        ("player", "cleaning", "audio"),
+        clean.INPUTS,
+        clean.OUTPUTS,
+        clean.CONFIG_KEYS,
         "M4",
+        clean.run,
     ),
     Stage(5, "classify", ("swings.parquet",), ("swings.parquet",), ("player", "classify"), "M5"),
     Stage(6, "metrics", ("swings.parquet",), ("metrics.parquet",), ("player", "metrics"), "M6"),
@@ -140,6 +143,7 @@ def run_pipeline(
                 continue
 
             _check_inputs(session, stage)
+            input_prints = session.fingerprints(stage.inputs)
             session.clear_stamp(stage.name)
             ctx.log("running", reason=reason)
             started = time.perf_counter()
@@ -156,7 +160,13 @@ def run_pipeline(
                 logger.error("failed", exc_info=True, extra={"fields": fields})
                 raise StageError(stage.name, f"{type(exc).__name__}: {exc}") from exc
             elapsed = round(time.perf_counter() - started, 3)
-            session.write_stamp(stage.name, chash, elapsed_s=elapsed)
+            session.write_stamp(
+                stage.name,
+                chash,
+                inputs=input_prints,
+                outputs=session.fingerprints(stage.outputs),
+                elapsed_s=elapsed,
+            )
             ctx.log("done", elapsed_s=elapsed)
             ran.append(stage.name)
         log(logger, "pipeline end", session=session.id, ran=ran)

@@ -24,7 +24,12 @@ class _Section(BaseModel):
 
 
 class PlayerConfig(_Section):
-    handedness: Literal["right", "left"] = "right"
+    handedness: Literal["auto", "right", "left"] = "auto"
+    # Which tracked player is you: auto (louder hits on the clip-on mic, else near_at_start),
+    # near_at_start, or A / B as shown by `tennis players` (A = near player at the start).
+    identity: Literal["auto", "near_at_start", "A", "B"] = "auto"
+    identity_loudness_db: float = Field(4.0, ge=0)
+    min_side_duration_s: float = Field(60.0, ge=0)
     camera_side: Literal["behind_baseline", "side_on"] = "behind_baseline"
     forward_sign: Literal[1, -1] = 1
 
@@ -42,7 +47,10 @@ class AudioConfig(_Section):
     amplitude_window_s: float = Field(0.02, gt=0)
     min_prominence_db: float = Field(6.0, ge=0)
     own_hit_db_threshold: float = 6.0
-    wrist_confirm_window_s: float = Field(0.15, gt=0)
+    # Tuned on the 2025-01-10 Wingfield match (spec: 0.15 s, no speed threshold).
+    wrist_confirm_window_s: float = Field(0.2, gt=0)
+    wrist_confirm_min_speed: float = Field(6.0, ge=0)
+    wrist_confirm_wrist: Literal["either", "racket"] = "either"
 
 
 class PoseConfig(_Section):
@@ -60,6 +68,18 @@ class PoseConfig(_Section):
     crop_pad: float = Field(0.2, ge=0)
     seek_gap_s: float = Field(3.0, ge=0)
     hwaccel: str | None = None
+    track_far: bool = True
+    far_crop: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 0.5)
+    far_imgsz: int = Field(960, ge=32)
+
+    @model_validator(mode="after")
+    def _check_far_crop(self) -> PoseConfig:
+        x1, y1, x2, y2 = self.far_crop
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError(
+                "pose.far_crop must be [x1, y1, x2, y2] fractions with x1 < x2, y1 < y2"
+            )
+        return self
 
 
 class WindowsConfig(_Section):
@@ -68,9 +88,11 @@ class WindowsConfig(_Section):
 
 
 class OneEuroConfig(_Section):
-    min_cutoff: float = Field(1.0, gt=0)
-    beta: float = Field(0.05, ge=0)
+    # Tuned on the 2025-01-10 Wingfield match (spec: 1.0 and 0.05, which flatten swings).
+    min_cutoff: float = Field(3.0, gt=0)
+    beta: float = Field(0.5, ge=0)
     d_cutoff: float = Field(1.0, gt=0)
+    zero_phase: bool = True
 
 
 class SavgolConfig(_Section):
@@ -184,13 +206,23 @@ class Config(_Section):
     report: ReportConfig = ReportConfig()
     labels: LabelsConfig = LabelsConfig()
 
-    def section_hash(self, *sections: str) -> str:
-        """Stable hash of the named top-level sections, used for stage caching.
+    def section_hash(self, *keys: str) -> str:
+        """Stable hash of config values, used for stage caching.
 
-        Paths are excluded on purpose: moving the data root must not invalidate results.
+        A key is a whole section (``"pose"``) or one field of it (``"audio.onset_k"``).
+        Paths are left out on purpose: moving the data root must not invalidate results.
         """
-        dumped = self.model_dump(mode="json", include=set(sections)) if sections else {}
-        blob = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
+        data = self.model_dump(mode="json")
+        picked: dict[str, Any] = {}
+        for key in sorted(set(keys), key=lambda k: (k.count("."), k)):
+            section, _, name = key.partition(".")
+            if section not in data or (name and name not in data[section]):
+                raise KeyError(f"unknown config key '{key}'")
+            if not name:
+                picked[section] = data[section]
+            elif section not in keys:  # a whole section already covers its fields
+                picked.setdefault(section, {})[name] = data[section][name]
+        blob = json.dumps(picked, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 

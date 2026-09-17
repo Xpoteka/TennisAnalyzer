@@ -147,6 +147,27 @@ def test_stale_reasons(session: Session) -> None:
     assert "output missing" in (session.stale_reason("s", ins, outs, "h1") or "")
 
 
+def test_stale_reasons_with_fingerprints(session: Session) -> None:
+    ins, outs = ("in.txt",), ("out.txt",)
+    in_p, out_p = session.path("in.txt"), session.path("out.txt")
+    _touch(in_p, 3_000)
+    _touch(out_p, 1_000)  # older than the input: fine, the recorded fingerprints decide
+    session.write_stamp("s", "h", session.fingerprints(ins), session.fingerprints(outs))
+    assert session.stale_reason("s", ins, outs, "h") is None
+
+    _touch(in_p, 3_001)
+    assert session.stale_reason("s", ins, outs, "h") == "input changed: in.txt"
+    _touch(in_p, 3_000)
+    assert session.stale_reason("s", ins, outs, "h") is None
+
+    out_p.write_text("edited by hand")
+    _touch(out_p, 1_000)
+    assert session.stale_reason("s", ins, outs, "h") == "output changed: out.txt"
+
+    in_p.unlink()
+    assert session.stale_reason("s", ins, outs, "h") == "input missing: in.txt"
+
+
 def test_stale_on_version_change(session: Session) -> None:
     session.write_stamp("s", "h")
     stamp = session.stamp_path("s")

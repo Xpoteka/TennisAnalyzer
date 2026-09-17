@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 from scipy.io import wavfile
@@ -16,11 +17,18 @@ from tennis.pose_backends import Image, PersonPose, register_backend
 from tennis.session import Session, create_or_reuse_session
 from tennis.stages import run_pipeline
 from tennis.stages.pose import KEYPOINT_COLUMNS, frame_size, should_refine
+from tennis.util import appearance
 from tennis.util.frames import FrameReader, Window
 from tennis.util.io import read_parquet_provenance
 from tennis.util.log import get_logger
 from tennis.util.video import frame_intervals, read_frame_pts
-from tests.conftest import COUNTER_PERIOD, MakeVideo, frame_number, needs_ffmpeg
+from tests.conftest import (
+    COUNTER_PERIOD,
+    MakeVideo,
+    frame_number,
+    implemented_stages,
+    needs_ffmpeg,
+)
 from tests.synth import render
 
 pytestmark = needs_ffmpeg
@@ -108,7 +116,7 @@ def test_pose_stage(
         pose=PoseConfig(backend="fake", contacts="all", batch_size=7, crop_refine="never"),
     )
     ran = run_pipeline(session, config, get_logger())
-    assert ran == ["ingest", "contacts", "pose"]
+    assert ran == implemented_stages()
 
     path = session.dir / "keypoints.parquet"
     table = pq.read_table(path)
@@ -121,6 +129,11 @@ def test_pose_stage(
     assert len(KEYPOINT_COLUMNS) == 51
 
     pts = pq.read_table(session.dir / "frame_times.parquet").column("pts").to_numpy()
+    assert set(table.column("slot").to_pylist()) == {"near", "far"}
+    far = table.filter(pc.equal(table["slot"], "far")).to_pydict()
+    assert all(far["detected"]) and set(far["bbox_x2"]) == {44.0}  # the far player
+    assert len(table.column("appearance")[0]) == appearance.SIZE
+    table = table.filter(pc.equal(table["slot"], "near"))
     d = table.to_pydict()
     # Windows [1.0, 2.9] (two merged contacts) and [5.0, 6.5].
     expected = [i for i, t in enumerate(pts) if 1.0 - 0.01 <= t <= 2.91 or 4.99 <= t <= 6.51]
@@ -140,8 +153,9 @@ def test_pose_stage(
     changed = config.model_copy(
         update={"pose": config.pose.model_copy(update={"crop_refine": "always"})}
     )
-    assert run_pipeline(session, changed, get_logger()) == ["pose"]
-    refined = pq.read_table(path).to_pydict()
+    assert run_pipeline(session, changed, get_logger()) == implemented_stages("pose")
+    refined_table = pq.read_table(path)
+    refined = refined_table.filter(pc.equal(refined_table["slot"], "near")).to_pydict()
     assert read_parquet_provenance(path)["crop_refine"] == "true"
     # The crop pass saw the same frame; its keypoints are shifted by the crop's origin,
     # which is the box padded by 20% of its width (box x2 is always 30).
@@ -156,7 +170,7 @@ def test_pose_stage_self_contacts_only(
     # All clicks are equally loud, so none is 6 dB above the median: no windows.
     session = _session_with_clicks(make_video, tmp_path, data_root, [2.0, 6.0])
     config = Config(paths=PathsConfig(data_root=data_root), pose=PoseConfig(backend="fake"))
-    assert run_pipeline(session, config, get_logger()) == ["ingest", "contacts", "pose"]
+    assert run_pipeline(session, config, get_logger()) == implemented_stages()
     table = pq.read_table(session.dir / "keypoints.parquet")
     assert table.num_rows == 0
     assert table.schema.field("r_wrist_x").type == pa.float32()
@@ -202,3 +216,23 @@ def test_pose_preview(
     assert info.video is not None and info.video.codec == "h264"
     assert info.video.nb_frames == summaries[0].frames
     assert out.with_suffix(".csv").read_text().startswith("window_id,start_s")
+
+
+def test_players_sheet(
+    make_video: MakeVideo, tmp_path: Path, data_root: Path, fake_backend: FakeBackend
+) -> None:
+    import cv2
+
+    from tennis.review import render_players
+
+    session = _session_with_clicks(make_video, tmp_path, data_root, [2.0, 6.0])
+    config = Config(
+        paths=PathsConfig(data_root=data_root),
+        pose=PoseConfig(backend="fake", contacts="all", crop_refine="never"),
+    )
+    run_pipeline(session, config, get_logger())
+    out, players = render_players(session, config, per_player=3)
+    assert players["me"] == "A"
+    assert len(players["windows"]) == 2
+    image = cv2.imread(str(out))
+    assert image is not None and image.shape[0] == 2 * 220  # one row per identity

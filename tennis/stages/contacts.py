@@ -51,6 +51,16 @@ if TYPE_CHECKING:
 SCHEMA_VERSION = 1
 INPUTS = ("audio.wav", "metadata.json", "frame_times.parquet")
 OUTPUTS = ("contacts.parquet",)
+CONFIG_KEYS = (
+    "audio.highpass_hz",
+    "audio.highpass_order",
+    "audio.onset_k",
+    "audio.min_separation_s",
+    "audio.threshold_window_s",
+    "audio.amplitude_window_s",
+    "audio.min_prominence_db",
+    "audio.own_hit_db_threshold",
+)
 
 DEFAULT_GRID_K = (3.0, 4.0, 6.0, 8.0, 12.0, 16.0)
 DEFAULT_GRID_CUTOFF = (400.0, 800.0, 1500.0, 3000.0)
@@ -200,6 +210,68 @@ def _in_segments(
     return mask
 
 
+@dataclass(frozen=True)
+class LabelScorer:
+    """Scores predicted event times (PTS) against labels inside evaluation segments."""
+
+    spec: LabelSpec
+    truth_pts: npt.NDArray[np.float64]
+    segments: list[tuple[float, float]]  # video time, label offset applied
+    pts_segments: list[tuple[float, float]]
+
+    def in_range(self, t_pts: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
+        return _in_segments(t_pts, self.pts_segments)
+
+    def score(self, pred_pts: npt.NDArray[np.float64]) -> MatchResult:
+        return match_events(
+            pred_pts,
+            self.truth_pts,
+            self.spec.tolerance_s,
+            resolution_s=self.spec.resolution_s,
+            offset_s=self.spec.offset_s,
+        )
+
+
+def make_scorer(
+    session: Session,
+    labels: LabelSpec,
+    segments: Sequence[tuple[float, float]] | None = None,
+    margin_s: float = 1.0,
+) -> LabelScorer:
+    """Only detections and labels inside ``segments`` count, so partly labeled sessions
+    work. Segments use the labels' clock (``labels.offset_s`` is applied to them too).
+    Without segments, the range is the first/last label window +- ``margin_s``.
+    """
+    if not session.path("metadata.json").exists():
+        raise UserError(f"session '{session.id}' has no metadata.json; run 'tennis process'")
+    if labels.times_s.size == 0:
+        raise UserError("no labels to evaluate against")
+    video_start = float(read_json(session.path("metadata.json")).get("video_start_s", 0.0))
+    windows = labels.times_s + labels.offset_s
+    if segments is None:
+        ranges = [
+            (
+                max(0.0, float(windows[0]) - margin_s),
+                float(windows[-1]) + labels.resolution_s + margin_s,
+            )
+        ]
+    else:
+        ranges = [(a + labels.offset_s, b + labels.offset_s) for a, b in segments]
+    ranges = sorted((float(a), float(b)) for a, b in ranges)
+    if any(b <= a for a, b in ranges):
+        raise UserError("every evaluation segment must end after it starts")
+    centers = windows + labels.resolution_s / 2
+    truth = labels.times_s[_in_segments(centers, ranges)] + video_start
+    if truth.size == 0:
+        raise UserError("no labels fall inside the evaluation segments")
+    return LabelScorer(
+        spec=labels,
+        truth_pts=truth,
+        segments=ranges,
+        pts_segments=[(a + video_start, b + video_start) for a, b in ranges],
+    )
+
+
 def tune_contacts(
     session: Session,
     audio_cfg: AudioConfig,
@@ -216,52 +288,15 @@ def tune_contacts(
 
     ``target="self"`` scores the first-pass own-hit selection (``is_self_audio``);
     ``target="any"`` scores every onset, for labels that cover all hits by both players.
-
-    Only detections and labels inside ``segments`` count, so partly labeled sessions
-    work. Segments use the labels' clock (``labels.offset_s`` is applied to them too).
-    Without segments, the range is the first/last label window +- ``margin_s``.
-    Detection always runs on the whole session, so the median used by
-    the dB threshold matches a real run.
+    See ``make_scorer`` for how labels and segments are read. Detection always runs on
+    the whole session, so the median used by the dB threshold matches a real run.
     """
     if target not in ("self", "any"):
         raise UserError(f"unknown target {target!r}: use 'self' or 'any'")
-    for name in ("audio.wav", "metadata.json"):
-        if not session.path(name).exists():
-            raise UserError(f"session '{session.id}' has no {name}; run 'tennis process' first")
-    if labels.times_s.size == 0:
-        raise UserError("no labels to tune against")
-    meta = read_json(session.path("metadata.json"))
-    video_start = float(meta.get("video_start_s", 0.0))
-    audio_start = float(meta.get("audio_start_s", 0.0))
-
-    windows = labels.times_s + labels.offset_s
-    if segments is None:
-        segments = [
-            (
-                max(0.0, float(windows[0]) - margin_s),
-                float(windows[-1]) + labels.resolution_s + margin_s,
-            )
-        ]
-    else:
-        segments = [(a + labels.offset_s, b + labels.offset_s) for a, b in segments]
-    segments = sorted((float(a), float(b)) for a, b in segments)
-    if any(b <= a for a, b in segments):
-        raise UserError("every evaluation segment must end after it starts")
-    centers = windows + labels.resolution_s / 2
-    truth = labels.times_s[_in_segments(centers, segments)] + video_start
-    if truth.size == 0:
-        raise UserError("no labels fall inside the evaluation segments")
-    pts_segments = [(a + video_start, b + video_start) for a, b in segments]
-
-    def match(pred: npt.NDArray[np.float64]) -> MatchResult:
-        return match_events(
-            pred,
-            truth,
-            labels.tolerance_s,
-            resolution_s=labels.resolution_s,
-            offset_s=labels.offset_s,
-        )
-
+    if not session.path("audio.wav").exists():
+        raise UserError(f"session '{session.id}' has no audio.wav; run 'tennis process' first")
+    scorer = make_scorer(session, labels, segments, margin_s)
+    audio_start = float(read_json(session.path("metadata.json")).get("audio_start_s", 0.0))
     grid: Sequence[float | None] = list(db_thresholds) if target == "self" else [None]
     sr, samples = read_wav_mono(session.path("audio.wav"))
     base_params = onset_params(audio_cfg)
@@ -271,8 +306,8 @@ def tune_contacts(
         for k in ks:
             onsets = pick_onsets(envelope, replace(base_params, onset_k=k))
             t = onsets.time_s + audio_start
-            in_range = _in_segments(t, pts_segments)
-            any_result = match(t[in_range])
+            in_range = scorer.in_range(t)
+            any_result = scorer.score(t[in_range])
             for db in grid:
                 selected = in_range if db is None else in_range & classify_self(onsets.peak_db, db)
                 rows.append(
@@ -282,7 +317,7 @@ def tune_contacts(
                         own_hit_db_threshold=db,
                         onsets_in_range=int(in_range.sum()),
                         selected_in_range=int(selected.sum()),
-                        result=any_result if db is None else match(t[selected]),
+                        result=any_result if db is None else scorer.score(t[selected]),
                         recall_any=any_result.recall,
                     )
                 )
@@ -299,8 +334,8 @@ def tune_contacts(
     return TuneReport(
         session_id=session.id,
         target=target,
-        labels=int(truth.size),
-        segments=list(segments),
+        labels=int(scorer.truth_pts.size),
+        segments=scorer.segments,
         spec=labels,
         current=(audio_cfg.highpass_hz, audio_cfg.onset_k, current_db),
         rows=rows,

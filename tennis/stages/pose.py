@@ -1,11 +1,13 @@
 """Stage 3: pose extraction around contacts (spec section 6.3).
 
-Output ``keypoints.parquet`` (schema_version 1), one row per decoded frame inside a window:
+Output ``keypoints.parquet`` (schema_version 2), one row per decoded frame inside a window
+and per tracked slot (``near``, and ``far`` when ``pose.track_far`` is on):
 
 ====================  =======  ======================================================
 frame_idx             int64    row index into frame_times.parquet
 t_video               float64  PTS of the frame
 window_id             int32    merged analysis window
+slot                  string   near: the near-court player; far: the far-court player
 detected              bool     a player was selected in this frame
 track_reset           bool     the selection fell back to the first-frame rule
 n_persons             int16    people the backend found in the frame
@@ -13,7 +15,11 @@ bbox_x1..bbox_y2      float32  selected player's box, pixels (NaN if not detecte
 bbox_conf             float32
 <kp>_x, <kp>_y        float32  keypoint position, pixels (COCO-17, e.g. r_wrist_x)
 <kp>_conf             float32  keypoint confidence (0 if not detected)
+appearance            list     clothing-color descriptor (tennis.util.appearance)
 ====================  =======  ======================================================
+
+The far player is searched in a full-resolution crop (``pose.far_crop``) as well as in the
+full frame, because far-side players are only a few dozen pixels tall.
 
 Parquet metadata also records the frame size, backend, model, device and whether the
 crop refinement pass ran.
@@ -44,6 +50,7 @@ from tennis.pose_backends import (
     resolve_model_path,
 )
 from tennis.session import SOURCE_INPUT
+from tennis.util import appearance
 from tennis.util.frames import (
     PTS_TOLERANCE_S,
     Frame,
@@ -59,7 +66,8 @@ from tennis.util.video import ProbeError
 if TYPE_CHECKING:
     from tennis.stages import StageContext
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SLOTS = ("near", "far")
 INPUTS = ("contacts.parquet", "frame_times.parquet", "metadata.json", SOURCE_INPUT)
 OUTPUTS = ("keypoints.parquet",)
 CROP_REFINE_FACTOR = 2.5  # auto-refine when the frame's long side exceeds imgsz by this
@@ -115,17 +123,20 @@ class _Rows:
     frame_idx: list[int] = field(default_factory=list)
     t_video: list[float] = field(default_factory=list)
     window_id: list[int] = field(default_factory=list)
+    slot: list[str] = field(default_factory=list)
     detected: list[bool] = field(default_factory=list)
     track_reset: list[bool] = field(default_factory=list)
     n_persons: list[int] = field(default_factory=list)
     boxes: list[npt.NDArray[np.float32]] = field(default_factory=list)  # (5,) incl. conf
     keypoints: list[npt.NDArray[np.float32]] = field(default_factory=list)  # (17, 3)
+    looks: list[npt.NDArray[np.float32]] = field(default_factory=list)
 
-    def add(self, frame: Frame, n: int, person: PersonPose | None, reset: bool,
+    def add(self, frame: Frame, slot: str, n: int, person: PersonPose | None, reset: bool,
             keypoints: npt.NDArray[np.float32] | None) -> None:  # fmt: skip
         self.frame_idx.append(frame.index)
         self.t_video.append(frame.pts)
         self.window_id.append(frame.window_id)
+        self.slot.append(slot)
         self.n_persons.append(n)
         self.track_reset.append(reset)
         self.detected.append(person is not None)
@@ -134,9 +145,12 @@ class _Rows:
             kp = np.full((NUM_KEYPOINTS, 3), np.nan, np.float32)
             kp[:, 2] = 0.0
             self.keypoints.append(kp)
+            self.looks.append(np.zeros(appearance.SIZE, np.float32))
         else:
             self.boxes.append(np.array([*person.bbox, person.bbox_conf], np.float32))
             self.keypoints.append(keypoints.astype(np.float32))
+            box = appearance.torso_box(person.bbox, keypoints)
+            self.looks.append(appearance.descriptor(frame.image, box))
 
     def __len__(self) -> int:
         return len(self.frame_idx)
@@ -145,11 +159,14 @@ class _Rows:
         n = len(self)
         boxes = np.stack(self.boxes) if n else np.zeros((0, 5), np.float32)
         kps = np.stack(self.keypoints) if n else np.zeros((0, NUM_KEYPOINTS, 3), np.float32)
-        order = np.argsort(np.asarray(self.frame_idx, np.int64), kind="stable")
+        looks = np.stack(self.looks) if n else np.zeros((0, appearance.SIZE), np.float32)
+        slot_code = np.array([SLOTS.index(x) for x in self.slot], np.int8)
+        order = np.lexsort((slot_code, np.asarray(self.frame_idx, np.int64)))
         columns: dict[str, pa.Array] = {
             "frame_idx": pa.array(np.asarray(self.frame_idx, np.int64)[order]),
             "t_video": pa.array(np.asarray(self.t_video, np.float64)[order]),
             "window_id": pa.array(np.asarray(self.window_id, np.int32)[order]),
+            "slot": pa.array([self.slot[i] for i in order], pa.string()),
             "detected": pa.array(np.asarray(self.detected, bool)[order]),
             "track_reset": pa.array(np.asarray(self.track_reset, bool)[order]),
             "n_persons": pa.array(np.asarray(self.n_persons, np.int16)[order]),
@@ -160,7 +177,43 @@ class _Rows:
         for k, kp_name in enumerate(KEYPOINT_NAMES):
             for c, suffix in enumerate(("x", "y", "conf")):
                 columns[f"{kp_name}_{suffix}"] = pa.array(kps[order, k, c])
+        flat = pa.array(looks[order].ravel(), pa.float32())
+        columns["appearance"] = pa.FixedSizeListArray.from_arrays(flat, appearance.SIZE)
         return pa.table(columns)
+
+
+def far_crop_px(fractions: tuple[float, float, float, float], width: int,
+                height: int) -> tuple[int, int, int, int]:  # fmt: skip
+    x1, y1, x2, y2 = fractions
+    return (round(x1 * width), round(y1 * height), round(x2 * width), round(y2 * height))
+
+
+def _shift(p: PersonPose, dx: int, dy: int) -> PersonPose:
+    kp = p.keypoints.copy()
+    kp[:, 0] += dx
+    kp[:, 1] += dy
+    x1, y1, x2, y2 = p.bbox
+    return PersonPose((x1 + dx, y1 + dy, x2 + dx, y2 + dy), p.bbox_conf, kp)
+
+
+def far_candidates(
+    full: Sequence[PersonPose],
+    cropped: Sequence[PersonPose],
+    tracker: PlayerTracker,
+    near_player: PersonPose | None = None,
+) -> list[PersonPose]:
+    """People in the far half: crop detections first, plus full-frame ones they missed.
+
+    Anyone overlapping the selected near player is left out, so both slots never follow
+    the same person.
+    """
+    found = [p for p in cropped if tracker.in_region(p.bbox)]
+    for p in full:
+        if tracker.in_region(p.bbox) and all(iou(p.bbox, q.bbox) < 0.5 for q in found):
+            found.append(p)
+    if near_player is not None:
+        found = [p for p in found if iou(p.bbox, near_player.bbox) <= 0.3]
+    return found
 
 
 def _refine_with_crops(
@@ -210,39 +263,60 @@ def extract(
     reader: FrameReader,
     windows: Sequence[Window],
     refine: bool,
+    far_backend: PoseBackend | None = None,
 ) -> tuple[_Rows, dict[str, int]]:
     cfg = ctx.config.pose
-    tracker = PlayerTracker(reader.height, cfg.near_court_min_y, cfg.track_iou_min)
+    near = PlayerTracker(reader.height, cfg.near_court_min_y, cfg.track_iou_min, "near")
+    far = PlayerTracker(reader.height, cfg.near_court_min_y, cfg.track_iou_min, "far")
+    far_backend = far_backend or backend
+    fx1, fy1, fx2, fy2 = far_crop_px(cfg.far_crop, reader.width, reader.height)
     rows = _Rows()
-    stats = {"frames": 0, "detected": 0, "resets": 0, "refined": 0, "failed_windows": 0}
+    stats = {"frames": 0, "detected": 0, "detected_far": 0, "resets": 0, "refined": 0,
+             "failed_windows": 0}  # fmt: skip
     current_window = -1
     started = last_report = time.perf_counter()
 
     def flush(batch: list[Frame]) -> None:
         nonlocal current_window
         people_per_frame = backend.infer([f.image for f in batch])
+        far_people: list[list[PersonPose]] = [[] for _ in batch]
+        if cfg.track_far:
+            crops = far_backend.infer([f.image[fy1:fy2, fx1:fx2] for f in batch])
+            far_people = [[_shift(p, fx1, fy1) for p in found] for found in crops]
         selected: list[PersonPose | None] = []
         resets: list[bool] = []
-        for frame, people in zip(batch, people_per_frame, strict=True):
+        far_rows: list[tuple[int, PersonPose | None, bool]] = []
+        for frame, people, cropped in zip(batch, people_per_frame, far_people, strict=True):
             if frame.window_id != current_window:
-                tracker.reset()
+                near.reset()
+                far.reset()
                 current_window = frame.window_id
-            sel = tracker.update(people)
+            sel = near.update(people)
             selected.append(None if sel.index is None else people[sel.index])
             resets.append(sel.track_reset)
+            if cfg.track_far:
+                candidates = far_candidates(people, cropped, far, selected[-1])
+                fsel = far.update(candidates)
+                person = None if fsel.index is None else candidates[fsel.index]
+                far_rows.append((len(candidates), person, fsel.track_reset))
         keypoints: list[npt.NDArray[np.float32] | None]
         if refine:
             keypoints, n_refined = _refine_with_crops(backend, batch, selected, cfg.crop_pad)
             stats["refined"] += n_refined
         else:
             keypoints = [None if p is None else p.keypoints for p in selected]
-        for frame, people, person, reset, kp in zip(
-            batch, people_per_frame, selected, resets, keypoints, strict=True
+        for i, (frame, people, person, reset, kp) in enumerate(
+            zip(batch, people_per_frame, selected, resets, keypoints, strict=True)
         ):
-            rows.add(frame, len(people), person, reset, kp)
+            rows.add(frame, "near", len(people), person, reset, kp)
             stats["frames"] += 1
             stats["detected"] += person is not None
             stats["resets"] += reset
+            if cfg.track_far:
+                n_far, far_person, far_reset = far_rows[i]
+                rows.add(frame, "far", n_far, far_person, far_reset,
+                         None if far_person is None else far_person.keypoints)  # fmt: skip
+                stats["detected_far"] += far_person is not None
         report_progress()
 
     def report_progress() -> None:
@@ -299,6 +373,10 @@ def run(ctx: StageContext) -> None:
         # Loading a model is slow (and may download it), so only do it when needed.
         backend, device = create_backend(config.pose, config.paths.data_root)
         backend_name = backend.name
+        far_backend = None
+        if config.pose.track_far and config.pose.far_imgsz != config.pose.imgsz:
+            far_cfg = config.pose.model_copy(update={"imgsz": config.pose.far_imgsz})
+            far_backend, _ = create_backend(far_cfg, config.paths.data_root)
     else:
         backend, device, backend_name = None, "none", config.pose.backend
     ctx.log(
@@ -325,10 +403,10 @@ def run(ctx: StageContext) -> None:
     )
     started = time.perf_counter()
     if backend is None:
-        rows, stats = _Rows(), {"frames": 0, "detected": 0, "resets": 0, "refined": 0,
-                                "failed_windows": 0}  # fmt: skip
+        rows, stats = _Rows(), {"frames": 0, "detected": 0, "detected_far": 0, "resets": 0,
+                                "refined": 0, "failed_windows": 0}  # fmt: skip
     else:
-        rows, stats = extract(ctx, backend, reader, windows, refine)
+        rows, stats = extract(ctx, backend, reader, windows, refine, far_backend)
     elapsed = time.perf_counter() - started
 
     write_parquet(
@@ -352,6 +430,9 @@ def run(ctx: StageContext) -> None:
         frames=frames,
         planned=planned,
         detected_ratio=round(stats["detected"] / frames, 3) if frames else None,
+        far_detected_ratio=round(stats["detected_far"] / frames, 3)
+        if frames and config.pose.track_far
+        else None,
         track_resets=stats["resets"],
         refined=stats["refined"],
         failed_windows=stats["failed_windows"],

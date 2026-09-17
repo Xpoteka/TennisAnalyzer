@@ -1,7 +1,8 @@
-"""Pick the player of interest in each frame (spec section 6.3).
+"""Follow one player per court half through the frames of a window (spec section 6.3).
 
-* First frame of a window: the largest person whose box bottom is in the near court
-  (below ``near_court_min_y`` of the image height).
+* First frame of a window: the largest person in the tracker's half. The near half is
+  where the box bottom is below ``near_court_min_y`` of the image height; the far half is
+  everything above it.
 * Later frames: the person with the highest IoU to the previous selection.
 * If nobody overlaps enough, fall back to the first-frame rule and flag a track reset.
 * A frame with no usable detection keeps the previous box, so the track can pick the
@@ -35,18 +36,26 @@ class Selection:
 
 
 class PlayerTracker:
-    def __init__(self, image_height: int, near_court_min_y: float, iou_min: float) -> None:
-        self.min_bottom = near_court_min_y * image_height
+    def __init__(
+        self, image_height: int, near_court_min_y: float, iou_min: float, region: str = "near"
+    ) -> None:
+        if region not in ("near", "far"):
+            raise ValueError(f"unknown region {region!r}")
+        self.split = near_court_min_y * image_height
+        self.region = region
         self.iou_min = iou_min
         self.previous: Box | None = None
+
+    def in_region(self, box: Box) -> bool:
+        return (box[3] >= self.split) == (self.region == "near")
 
     def reset(self) -> None:
         self.previous = None
 
-    def _near_court_largest(self, people: Sequence[PersonPose]) -> int | None:
+    def _largest_in_region(self, people: Sequence[PersonPose]) -> int | None:
         best: int | None = None
         for i, p in enumerate(people):
-            if p.bbox[3] < self.min_bottom:
+            if not self.in_region(p.bbox):
                 continue
             if best is None or p.area > people[best].area:
                 best = i
@@ -54,7 +63,7 @@ class PlayerTracker:
 
     def update(self, people: Sequence[PersonPose]) -> Selection:
         if self.previous is None:
-            index = self._near_court_largest(people)
+            index = self._largest_in_region(people)
             reset = False
         else:
             prev = self.previous
@@ -63,7 +72,7 @@ class PlayerTracker:
             if best is not None and scores[best] >= self.iou_min:
                 index, reset = best, False
             else:
-                index = self._near_court_largest(people)
+                index = self._largest_in_region(people)
                 reset = index is not None
         if index is not None:
             self.previous = people[index].bbox

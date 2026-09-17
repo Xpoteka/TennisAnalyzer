@@ -31,3 +31,17 @@ def test_atomic_path_leaves_nothing_on_error(tmp_path: Path) -> None:
         tmp.write_text("half")
         raise RuntimeError
     assert list(tmp_path.iterdir()) == []
+
+
+def test_rewriting_identical_data_keeps_mtime(tmp_path: Path) -> None:
+    import os
+
+    path = tmp_path / "t.parquet"
+    table = pa.table({"x": [1, 2]})
+    write_parquet(table, path, stage="s", config_hash="a", schema_version=1)
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    write_parquet(table, path, stage="s", config_hash="b", schema_version=1)
+    assert path.stat().st_mtime_ns == 1_000_000_000
+    assert read_parquet_provenance(path)["config_hash"] == "b"
+    write_parquet(pa.table({"x": [1, 3]}), path, stage="s", config_hash="b", schema_version=1)
+    assert path.stat().st_mtime_ns > 1_000_000_000

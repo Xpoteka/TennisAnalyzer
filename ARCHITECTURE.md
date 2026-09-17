@@ -9,7 +9,7 @@ The pipeline is a fixed sequence of stages. Each stage reads files from the sess
 | 1 | ingest | source video | `metadata.json`, `audio.wav`, `frame_times.parquet` | none | **M1 (done)** |
 | 2 | contacts | `audio.wav`, `metadata.json`, `frame_times.parquet` | `contacts.parquet` | audio | **M2 (done, needs tuning)** |
 | 3 | pose | `contacts.parquet`, `frame_times.parquet`, `metadata.json`, source video | `keypoints.parquet` | pose, windows | **M3 (done, pending review)** |
-| 4 | clean | `keypoints.parquet`, `contacts.parquet` | `swings.parquet` | player, cleaning, audio | M4 |
+| 4 | clean | `keypoints.parquet`, `contacts.parquet`, `frame_times.parquet` | `swings.parquet`, `swing_info.parquet` | player, cleaning, windows, `pose.kp_conf_min`, `pose.contacts`, `audio.wrist_confirm_*` | **M4 (done)** |
 | 5 | classify | `swings.parquet` | `swings.parquet` | player, classify | M5 |
 | 6 | metrics | `swings.parquet` | `metrics.parquet` | player, metrics | M6 |
 | 7 | labels (optional) | `audio.wav`, `contacts.parquet` | `labels.parquet` | labels | M8 |
@@ -24,21 +24,30 @@ The registry lives in `tennis/stages/__init__.py`. The runner (`run_pipeline`) p
 
 ## Caching
 
-After a stage succeeds, the runner writes `.stamps/<stage>.json`. The stamp records the pipeline version, a hash of the config sections the stage uses, and the elapsed time.
+After a stage succeeds, the runner writes `.stamps/<stage>.json`. The stamp records:
+
+- the pipeline version;
+- a hash of the config values the stage uses;
+- a fingerprint (mtime and size) of every input and output;
+- the elapsed time.
+
+Each stage declares its config keys. A key is either a whole section (`pose`) or a single field (`audio.onset_k`). For example, changing a wrist-confirmation setting reruns only stage 4, not contact detection.
 
 A stage is **stale** in any of these cases:
 
 - it has no stamp;
 - the pipeline version changed;
-- the hash of its config sections changed;
+- the hash of its config keys changed;
 - an output is missing;
-- an input's mtime is newer than the oldest output.
+- an input or output fingerprint differs from the one recorded in the stamp.
 
-For the source video, the check follows the symlink to the raw file.
+For the source video, the check follows the symlink to the raw file. Stamps written before fingerprints existed fall back to the older rule: an input is newer than the oldest output.
+
+**Unchanged results don't trigger reruns.** When a stage rewrites an output with identical content, the file keeps its old modification time. For Parquet, "identical" means equal data; files of other types must be byte-identical. Downstream stages therefore don't rerun. For example, re-tuning contact detection in a way that yields the same onsets doesn't repeat the slow pose stage.
 
 The runner deletes a stage's stamp before running it. Outputs are written to a temporary file and then renamed into place. Together, these mean a crashed run never looks finished.
 
-The spec says outputs must be "newer than config". This implementation compares a config hash per stage instead of the config file's mtime. Editing an unrelated option therefore does not rerun a stage, and changing a relevant option always does, even if the file's timestamp is unchanged. `paths` is never part of the hash, so moving the data root does not invalidate results.
+The spec says outputs must be "newer than their inputs and config". This implementation compares recorded fingerprints and a config hash per stage instead of mtimes. Editing an unrelated option therefore does not rerun a stage, and changing a relevant option always does, even if the file's timestamp is unchanged. `paths` is never part of the hash, so moving the data root does not invalidate results.
 
 ## Time conventions
 
@@ -106,13 +115,15 @@ Two things differ from the spec:
 - **`min_prominence_db` (default 6 dB).** Detections quieter than this relative to the local background are dropped. Without this rule, the log-flux envelope's heavy tail produces several false detections per minute of plain noise.
 - **The first-pass own-hit rule is kept as specified, but it has a known limit.** It compares each onset to the *median* onset level, so it only works when your own hits are a minority of all onsets. That holds for real sessions (about 450 loud onsets out of about 3,000 in the first one). It fails when there are few other sounds. The second pass (wrist speed, M4) is the real safeguard.
 
-### `keypoints.parquet` (schema_version 1)
+### `keypoints.parquet` (schema_version 2)
 
 The file has one row per decoded frame inside an analysis window, sorted by `frame_idx`.
 
 | Column | Type | Meaning |
 |--------|------|---------|
 | `frame_idx`, `t_video` | int64, float64 | Frame index and PTS |
+| `slot` | string | `near` or `far`: which tracked player the row belongs to (one row per frame per slot) |
+| `appearance` | list<float32> | Clothing-color descriptor of the torso (`tennis/util/appearance.py`) |
 | `window_id` | int32 | Merged analysis window |
 | `detected` | bool | A player was selected in this frame |
 | `track_reset` | bool | The selection fell back to the first-frame rule because nothing overlapped the previous box enough |
@@ -127,9 +138,65 @@ How the stage works:
 1. **Windows:** it takes `[t − pre_s, t + post_s]` around each selected contact and merges overlapping ranges. Windows less than `seek_gap_s` apart are decoded in one pass instead of seeking again.
 2. **Decoding:** `tennis/util/frames.py` runs `ffmpeg -copyts -ss … -vf showinfo`. ffmpeg writes raw BGR frames, and its `showinfo` output gives each frame's PTS, which is matched to `frame_times.parquet` within 1 ms. ffmpeg applies rotation. PyAV isn't used, because on macOS its bundled FFmpeg clashes with OpenCV's.
 3. **Detection:** the backend finds everyone in each batch of frames.
-4. **Player selection:** `tennis/util/tracking.py` implements the spec's rule. In a window's first frame it picks the largest person whose box bottom is below `near_court_min_y`. After that it picks the highest IoU with the previous selection, and falls back to the first rule, with `track_reset`, when the IoU is below `track_iou_min`. A frame with no detection keeps the previous box.
+4. **Player selection:** `tennis/util/tracking.py` implements the spec's rule, once for each half of the court.
+   - **Near player:** in a window's first frame, the largest person whose box bottom is below `near_court_min_y`. After that, the person with the highest IoU with the previous selection. If the IoU is below `track_iou_min`, it falls back to the first rule and sets `track_reset`. A frame with no detection keeps the previous box.
+   - **Far player (`pose.track_far`):** the same rule, applied to people above that line. They are searched both in the full frame and in a full-resolution crop (`pose.far_crop`), because far players are only a few dozen pixels tall. This roughly doubles pose time.
 5. **Crop refinement:** if the frame is more than 2.5× the model's input size (for example 4K at 640 px), pose runs again on a full-resolution crop around the player, padded by `crop_pad`.
 6. **Model loading:** the model is loaded only when there is at least one window. A decoding failure skips that group of windows with a warning instead of failing the stage.
+
+### Identity and handedness: `players.json`
+
+The spec assumes a single player on the near side (re-identification is a non-goal). Real sessions have two players who change ends, so stage 4 works out who is who (`tennis/util/identity.py`):
+
+1. **Match the two players.** For each pose window, it takes the median appearance of the near and the far player. It then matches these to two identities with a two-cluster assignment, with the rule that the two players in a window are different people. A is the near player of the first window. The window assignments are smoothed by majority vote, because players only change ends between games.
+2. **Attribute each contact** to the player whose wrist speed peaks highest near it, if that peak reaches `wrist_confirm_min_speed`.
+3. **Decide which identity is you** (`player.identity`):
+   - `auto`: the identity whose attributed hits are at least `identity_loudness_db` louder, which works with the clip-on mic; otherwise A;
+   - `near_at_start`: always A;
+   - `A` or `B`: set explicitly.
+4. **Your racket hand** (`player.handedness: auto`): for your own near-side hits, it votes on which wrist peaks faster. With fewer than five votes, it assumes right-handed.
+5. **Your swings.** Every candidate contact becomes a swing built from *your* keypoints, on whichever side you are. Far-side swings fail QC with `far side (not measured)`. `is_self_confirmed` also requires the hit to be attributed to you.
+
+`players.json` records:
+
+- the decision and its reason;
+- loudness statistics;
+- the handedness votes;
+- the side segments;
+- per-window assignments and margins;
+- hit counts;
+- the appearance prototypes.
+
+`tennis players` prints this and writes a thumbnail sheet.
+
+### `swings.parquet` and `swing_info.parquet` (schema_version 1)
+
+Stage 4 turns every candidate contact into a swing. By default the candidates are the first-pass own hits; with `pose.contacts: all`, every onset becomes a candidate. The column lists are in the `tennis/stages/clean.py` docstring. In short:
+
+- **`swings.parquet`** has one row per swing per frame. It holds `t_rel`, the normalized keypoints `<kp>_x`/`<kp>_y`, the cleaned pixel positions `<kp>_px`/`<kp>_py`, confidences, wrist velocities and speeds, a per-frame `valid` flag, and the swing's QC fields repeated on each row.
+- **`swing_info.parquet`** has one row per swing. It holds the contact time and frame, the normalization (origin and scale in pixels), QC (`valid_frame_ratio`, `swap_count`, `track_reset_count`, `qc_pass`, `qc_reason`), and the confirmation result (`wrist_peak_speed`, `wrist_peak_offset_s`, `is_self_confirmed`). It also records `player_side` (the side you were on), `hitter` (`self`, `other` or null), and the near and far players' peak wrist speeds. `swings.parquet` has a `player_side` column too, and both files store `racket_side` in their metadata.
+
+**Cleaning** runs once per pose window, in the spec's order:
+
+1. mask low-confidence points;
+2. fix left/right swaps (each paired group separately; confidences follow the swap);
+3. interpolate gaps of up to `max_gap_frames`, using timestamps;
+4. smooth. The default is One Euro; its `beta` is divided by the window's median torso length so it applies to torso-normalized speeds, and `zero_phase` averages a forward and a backward pass. Savitzky–Golay is also available.
+
+**Normalization** puts the origin at the hip midpoint at the contact frame (or at the nearest frame with both hips visible). The scale is the swing's median torso length, and y points up.
+
+**`t_rel`** is `t_video − t_contact`, where `t_contact` is the audio onset on the PTS timeline.
+
+A frame is **valid** when the player is detected and the racket-side shoulder, elbow and wrist and both hips are present after cleaning. A swing fails QC when any of these hold:
+
+- `valid frames / expected frames` is below `qc.min_valid_frame_ratio`;
+- the racket arm is missing at the contact frame;
+- it has more than `qc.max_track_resets` track resets;
+- there is no torso length or no hip position.
+
+**Confirmation:** the wrist speed must have a local maximum within ±`wrist_confirm_window_s` of the onset, and that maximum must reach `wrist_confirm_min_speed`. The speed is taken from the faster wrist by default, or only the racket wrist with `wrist_confirm_wrist: racket`. When several contacts share one wrist peak (for example a hit and a bounce), only the contact closest to the peak is confirmed.
+
+`tennis eval-contacts` scores the stored flags against labels and sweeps these settings. `tennis swing-plots` plots raw vs cleaned trajectories. Tuning results are in `docs/validation/M4_cleaning.md`.
 
 ### `audio.wav`
 
@@ -139,5 +206,5 @@ The schemas for the later stage outputs are in spec section 6. They will be docu
 
 ## Open design points for later milestones
 
-- **Stage 4 writes `is_self_confirmed` back into `contacts.parquet`.** Stage 3 reads that file, so the rewrite would make stage 3 look stale and cause reruns forever. Proposed fix: stage 4 writes the confirmation to its own output (for example, a column in `swings.parquet` or a `contacts_confirmed.parquet` file), and later stages read it from there.
+- **Resolved in M4: `is_self_confirmed` lives in `swing_info.parquet`, not in `contacts.parquet`.** The spec writes it back into `contacts.parquet`, which stages 3 and 4 read. In `contacts.parquet` the column stays null.
 - **Stage 5 modifies `swings.parquet` in place.** A file cannot be both an input and an output under mtime caching. Proposed fix: stage 5 writes a separate `strokes.parquet`, and readers join it on `swing_id`.

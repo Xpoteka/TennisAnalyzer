@@ -4,7 +4,12 @@
 # Changing a section only reruns the stages that depend on it.
 
 player:
-  handedness: right          # right | left. "Racket side" joints follow this.
+  handedness: auto           # auto | right | left. auto: from your own near-side hits.
+  identity: auto             # Which tracked player is you. auto: the one whose hits are clearly
+                             # louder on the clip-on mic, else near_at_start. A | B: as shown by
+                             # `tennis players` (A = the near player at the start).
+  identity_loudness_db: 4.0  # How much louder your hits must be for auto to trust the audio.
+  min_side_duration_s: 60    # Shorter stretches on one side are treated as identity mix-ups.
   camera_side: behind_baseline   # behind_baseline | side_on
   forward_sign: +1           # +1 | -1. Flips contact_forward if the camera setup is mirrored.
 
@@ -22,7 +27,11 @@ audio:                       # Stage 2: contact detection
   min_prominence_db: 6.0     # Onsets must be this much louder than the local background
                              # (drops noise flickers; not in the spec).
   own_hit_db_threshold: 6.0  # A contact is "self" if this many dB above the session median.
-  wrist_confirm_window_s: 0.15   # Wrist-speed peak must be this close to the onset (s).
+  wrist_confirm_window_s: 0.2    # Stage 4: the wrist speed must peak this close to the
+                                 # onset (s) to confirm an own hit (spec: 0.15),
+  wrist_confirm_min_speed: 6.0   # and reach this speed (torso lengths per second).
+  wrist_confirm_wrist: either    # either: the faster wrist (left/right labels are unreliable
+                                 # from behind); racket: the dominant wrist only (the spec).
 
 pose:                        # Stage 3: pose extraction
   backend: yolo              # Registered pose backend (yolo is built in).
@@ -43,6 +52,11 @@ pose:                        # Stage 3: pose extraction
   crop_pad: 0.2              # Padding around the player box for that crop.
   seek_gap_s: 3.0            # Windows closer than this are decoded in one pass instead of seeking.
   hwaccel: null              # ffmpeg -hwaccel value for decoding, e.g. videotoolbox or cuda.
+  track_far: true            # Also track the far-side player (to tell who hit, and to follow
+                             # you when you change ends). Costs a second inference per frame.
+  far_crop: [0.0, 0.0, 1.0, 0.5]     # Frame region (fractions) searched again for the small
+                                     # far-side player,
+  far_imgsz: 960                     # at this model input size.
 
 windows:                     # Frames analysed around each contact
   pre_s: 1.0                 # Seconds before contact.
@@ -51,9 +65,11 @@ windows:                     # Frames analysed around each contact
 cleaning:                    # Stage 4: cleaning and normalization
   smoother: one_euro         # one_euro | savgol
   one_euro:
-    min_cutoff: 1.0          # Lower = smoother at low speed, more lag.
-    beta: 0.05               # Higher = less lag at high speed.
+    min_cutoff: 3.0          # Lower = smoother at low speed, more lag (spec: 1.0).
+    beta: 0.5                # Higher = less lag at high speed, per torso length/s (spec: 0.05).
     d_cutoff: 1.0            # Cutoff for the derivative estimate.
+    zero_phase: true         # Average a forward and a backward pass to cancel the lag
+                             # (offline analysis; not in the spec).
   savgol:
     window: 9                # Odd number of frames.
     order: 3                 # Polynomial order, smaller than window.
