@@ -14,4 +14,4 @@ uv run tennis eval-classifier <id> --labels ... --report docs/validation/M5_clas
 uv run tennis eval-labels     <id> --labels ... --report docs/validation/M8_labels.md
 ```
 
-`M5_classifier.md` and `M8_labels.md` are still missing: both need a session that has been labelled by hand. See `docs/HANDOFF.md` §6.
+`M5_classifier.md` was measured on 2026-09-17 against the Wingfield stroke labels and fails the 90% target (58%); see `docs/HANDOFF.md` §3. `M8_labels.md` is still missing: it needs a session recorded with the label words spoken. See `docs/HANDOFF.md` §6.

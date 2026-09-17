@@ -14,11 +14,21 @@ MakeVideo = Callable[..., Path]
 COUNTER_PERIOD = 110  # keeps the counter pattern's luma within 16..235
 
 
-def implemented_stages(start: str = "ingest") -> list[str]:
-    """Names of the stages that run today (optional ones excluded), from ``start`` on."""
+def implemented_stages(start: str = "ingest", *, labels: bool = True) -> list[str]:
+    """Names of the stages that run today, from ``start`` on, in the order the runner uses.
+
+    The runner stops at the first unimplemented stage. Optional stages are included when
+    enabled (the labels stage is enabled by default).
+    """
     from tennis.stages import STAGES
 
-    names = [s.name for s in STAGES if s.implemented and not s.optional]
+    names: list[str] = []
+    for s in STAGES:
+        if s.optional and not labels:
+            continue
+        if not s.implemented:
+            break
+        names.append(s.name)
     return names[names.index(start) :]
 
 
