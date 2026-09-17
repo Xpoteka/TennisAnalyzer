@@ -36,6 +36,8 @@ class PlayerConfig(_Section):
 
 class PathsConfig(_Section):
     data_root: Path = Path("./data")
+    # Hand-made labels: manual_<session>.csv for stage 7, plus the validation label files.
+    labels_dir: Path = Path("./labels")
 
 
 class AudioConfig(_Section):
@@ -183,7 +185,10 @@ def _default_vocabulary() -> dict[str, list[str]]:
 
 class LabelsConfig(_Section):
     enabled: bool = True
+    backend: str = Field("faster_whisper", min_length=1)  # checked against the registry
     whisper_model: str = "small"
+    device: Literal["auto", "cuda", "cpu"] = "auto"
+    compute_type: str = "default"
     language: str = "en"
     max_delay_s: float = Field(3.0, gt=0)
     vocabulary: dict[str, list[str]] = Field(default_factory=_default_vocabulary)
@@ -263,10 +268,15 @@ def load_config(path: Path | None = None, *, cwd: Path | None = None) -> Config:
         where = str(path) if path is not None else "config"
         raise ConfigError(f"{where}: invalid configuration\n{_format_errors(exc)}") from exc
 
-    data_root = config.paths.data_root.expanduser()
-    if not data_root.is_absolute():
-        data_root = (base / data_root).resolve()
-    return config.model_copy(update={"paths": PathsConfig(data_root=data_root)})
+    resolved = {
+        name: _resolve(getattr(config.paths, name), base) for name in PathsConfig.model_fields
+    }
+    return config.model_copy(update={"paths": PathsConfig(**resolved)})
+
+
+def _resolve(path: Path, base: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else (base / expanded).resolve()
 
 
 def _format_errors(exc: ValidationError) -> str:

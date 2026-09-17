@@ -16,6 +16,8 @@ player:
 paths:
   data_root: ./data          # Sessions live in <data_root>/sessions/<id>/.
                              # A relative path is resolved against this file's directory.
+  labels_dir: ./labels       # Hand-made labels: manual_<session>.csv for stage 7, and the
+                             # label files the eval tools read.
 
 audio:                       # Stage 2: contact detection
   highpass_hz: 800           # High-pass Butterworth cutoff before onset detection (Hz).
@@ -107,8 +109,11 @@ report:                      # Stage 9
 
 labels:                      # Stage 7: voice labels (optional)
   enabled: true              # Also skippable per run with --no-labels.
-  whisper_model: small       # faster-whisper model size.
-  language: en
+  backend: faster_whisper    # Registered transcription backend.
+  whisper_model: small       # faster-whisper model size. Downloaded to <data_root>/models/whisper.
+  device: auto               # auto | cuda | cpu.
+  compute_type: default      # ctranslate2 compute type, e.g. int8, float16.
+  language: en               # Spoken language of your labels ("" to auto-detect).
   max_delay_s: 3.0           # A label word applies to the last own contact up to this long before.
   vocabulary:                # label: [spoken words]. A word may map to only one label.
     good: [good, nice, "yes"]    # quoted: bare yes is a boolean in YAML 1.1

@@ -432,6 +432,40 @@ def eval_classifier(
         typer.echo(f"wrote {report_path}", err=True)
 
 
+@app.command("eval-labels")
+def eval_labels(
+    session_id: str,
+    labels: Annotated[
+        Path, typer.Option(help="CSV of the label words you actually said ('t,label').")
+    ],
+    config: ConfigOpt = None,
+    tolerance_s: Annotated[
+        float, typer.Option(help="How far a stored label may sit from the spoken word.")
+    ] = 2.0,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
+) -> None:
+    """Score the voice labels against what was said (M8 acceptance: 80% matched)."""
+    from tennis.evaluation import evaluate_labels, format_label_eval
+    from tennis.util.io import read_json
+    from tennis.validation import read_word_labels
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    meta_path = session.path("metadata.json")
+    video_start = float(read_json(meta_path).get("video_start_s", 0.0)) if meta_path.exists() else 0
+    result = evaluate_labels(
+        session, read_word_labels(labels), tolerance_s=tolerance_s, video_start_s=video_start
+    )
+    typer.echo(format_label_eval(result))
+    if report_path is not None:
+        from tennis.evaluation import write_label_eval
+
+        write_label_eval(result, report_path)
+        typer.echo(f"wrote {report_path}", err=True)
+
+
 @app.command()
 def inspect(
     session_id: str,

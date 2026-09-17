@@ -15,6 +15,12 @@ from tennis.evaluation.contacts import (
     format_contact_eval,
     write_contact_eval,
 )
+from tennis.evaluation.labels import (
+    LabelEval,
+    evaluate_labels,
+    format_label_eval,
+    write_label_eval,
+)
 from tennis.evaluation.strokes import (
     ClassifierEval,
     ConfusionMatrix,
@@ -30,10 +36,14 @@ __all__ = [
     "ConfusionMatrix",
     "ContactEval",
     "EvalRow",
+    "LabelEval",
     "evaluate_classifier",
     "evaluate_contacts",
+    "evaluate_labels",
     "format_classifier_eval",
     "format_contact_eval",
+    "format_label_eval",
     "write_classifier_eval",
     "write_contact_eval",
+    "write_label_eval",
 ]
