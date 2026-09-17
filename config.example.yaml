@@ -80,6 +80,7 @@ cleaning:                    # Stage 4: cleaning and normalization
     max_track_resets: 2          # Swings with more player-track resets fail QC.
 
 classify:                    # Stage 5: stroke classification (normalized units)
+  classifier: rule               # Registered classifier (rule is built in).
   serve_wrist_above_nose: 0.3    # Racket wrist this far above the nose at contact = serve.
   volley_travel_max: 0.8         # Max pre-contact racket wrist travel for a volley.
   volley_bbox_bottom_max_y: 0.55 # Player box bottom above this image-height fraction = at net.

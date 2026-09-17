@@ -123,6 +123,7 @@ class CleaningConfig(_Section):
 
 
 class ClassifyConfig(_Section):
+    classifier: str = Field("rule", min_length=1)  # checked against the classifier registry
     serve_wrist_above_nose: float = 0.3
     volley_travel_max: float = Field(0.8, gt=0)
     volley_bbox_bottom_max_y: float = Field(0.55, ge=0, le=1)

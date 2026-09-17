@@ -387,12 +387,49 @@ def eval_contacts(
 @app.command("eval-classifier")
 def eval_classifier(
     session_id: str,
-    labels: Annotated[Path, typer.Option(help="CSV of labeled stroke types.")],
+    labels: Annotated[
+        Path, typer.Option(help="CSV of labeled stroke types ('t,stroke' or 't,player,stroke').")
+    ],
     config: ConfigOpt = None,
+    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
+    label_offset: Annotated[
+        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
+    ] = 0.0,
+    label_resolution: Annotated[
+        float, typer.Option(help="Label precision in seconds: a label t means [t, t + this].")
+    ] = 0.0,
+    segments: Annotated[
+        Path | None,
+        typer.Option(help="CSV of start,end ranges to evaluate, on the labels' clock."),
+    ] = None,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
 ) -> None:
-    """Print a confusion matrix for the stroke classifier."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("eval-classifier", "M5")
+    """Print a confusion matrix for the stroke classifier (M5 acceptance: 90% accuracy)."""
+    import numpy as np
+
+    from tennis.evaluation import evaluate_classifier, format_classifier_eval
+    from tennis.stages.contacts import LabelSpec, make_scorer
+    from tennis.validation import read_segments, read_stroke_labels
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    pairs = read_stroke_labels(labels)
+    spec = LabelSpec(
+        times_s=np.array([t for t, _ in pairs], dtype=np.float64),
+        tolerance_s=tolerance_ms / 1000,
+        resolution_s=label_resolution,
+        offset_s=label_offset,
+    )
+    scorer = make_scorer(session, spec, read_segments(segments) if segments else None)
+    result = evaluate_classifier(session, scorer, pairs)
+    typer.echo(format_classifier_eval(result))
+    if report_path is not None:
+        from tennis.evaluation import write_classifier_eval
+
+        write_classifier_eval(result, report_path)
+        typer.echo(f"wrote {report_path}", err=True)
 
 
 @app.command()
