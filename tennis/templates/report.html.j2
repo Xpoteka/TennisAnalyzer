@@ -1,0 +1,249 @@
+{% extends "base.html.j2" %}
+{% set s = report.summary %}
+{% block title %}Session {{ report.session_id }}{% endblock %}
+{% block body %}
+
+<header>
+  <h1>Session {{ report.session_id }}</h1>
+  <div class="sub">
+    {{ report.date }}
+    {% if s.duration_s == s.duration_s %}&middot; {{ s.duration_s | duration }}{% endif %}
+    {% if s.resolution %}&middot; {{ s.resolution }}{% endif %}
+    {% if s.fps == s.fps %}&middot; {{ s.fps | number(1) }} fps{% endif %}
+  </div>
+  <nav>
+    <a href="#summary">Summary</a>
+    <a href="#metrics">Metrics</a>
+    <a href="#trends">Trends</a>
+    <a href="#distributions">Distributions</a>
+    {% if report.labels %}<a href="#labels">Labels</a>{% endif %}
+    {% if report.clips %}<a href="#clips">Clips</a>{% endif %}
+    <a href="#diagnostics">Diagnostics</a>
+  </nav>
+</header>
+
+<h2 id="summary">Session summary</h2>
+<div class="cards">
+  <div class="card"><div class="name">Contacts heard</div><div class="value">{{ s.contacts }}</div></div>
+  <div class="card"><div class="name">Your swings</div><div class="value">{{ s.own_swings }}</div></div>
+  <div class="card"><div class="name">Confirmed</div><div class="value">{{ s.confirmed }}</div></div>
+  <div class="card">
+    <div class="name">QC pass rate</div>
+    <div class="value">
+      {% if s.qc_pass_rate == s.qc_pass_rate %}{{ (s.qc_pass_rate * 100) | number(0) }}%{% else %}-{% endif %}
+    </div>
+    <div class="sub">{{ s.qc_pass }} of {{ s.own_swings }}</div>
+  </div>
+  <div class="card"><div class="name">Measured</div><div class="value">{{ s.measured }}</div></div>
+  <div class="card"><div class="name">Outliers</div><div class="value">{{ s.outliers }}</div></div>
+</div>
+
+<h3>Swings per stroke type</h3>
+{% if s.per_stroke_type %}
+<table>
+  <thead><tr><th>Stroke type</th><th>Swings</th></tr></thead>
+  <tbody>
+    {% for name, count in s.per_stroke_type | dictsort %}
+    <tr><td>{{ name }}</td><td>{{ count }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No swing was classified in this session.</p>
+{% endif %}
+
+<h3>Who you are</h3>
+<p class="sub">
+  You are player <strong>{{ s.me or "?" }}</strong>{% if s.me_reason %} ({{ s.me_reason }}){% endif %},
+  playing {{ s.handedness or "?" }}-handed.
+</p>
+{% if s.sides %}
+<table>
+  <thead><tr><th>From</th><th>To</th><th>Your side</th><th>Windows</th></tr></thead>
+  <tbody>
+    {% for seg in s.sides %}
+    <tr>
+      <td>{{ seg.start | duration }}</td><td>{{ seg.end | duration }}</td>
+      <td>{{ seg.side }}</td><td>{{ seg.windows }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 id="metrics">Metrics</h2>
+{% if report.baseline_sessions %}
+<p class="sub">
+  Delta compares this session's mean with the mean of the last
+  {{ report.baseline_sessions | length }} session(s):
+  {{ report.baseline_sessions | join(", ") }}.
+</p>
+{% else %}
+<p class="sub">No earlier session has metrics, so there is nothing to compare against yet.</p>
+{% endif %}
+<p class="note">
+  A delta is only coloured for the metrics listed under <code>report.metric_direction</code>
+  in the config. For every other metric the direction that counts as an improvement has not
+  been decided, so the change is shown without a judgement.
+</p>
+{% for stroke_type, rows in report.metrics | groupby("stroke_type") %}
+<h3>{{ stroke_type }} ({{ rows[0].count }} swings)</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Metric</th><th>Unit</th><th>Mean</th><th>&plusmn; std</th>
+      <th>Median</th><th>p10</th><th>p90</th><th>Delta</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td title="{{ metrics_meta[row.metric].description if row.metric in metrics_meta else '' }}">
+        {{ row.metric }}
+      </td>
+      <td class="muted">{{ row.unit }}</td>
+      <td>{{ row.mean | number }}</td>
+      <td class="muted">{{ row.std | number }}</td>
+      <td>{{ row.median | number }}</td>
+      <td class="muted">{{ row.p10 | number }}</td>
+      <td class="muted">{{ row.p90 | number }}</td>
+      <td class="{{ row.direction }}">{{ row.delta | signed }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No metrics were computed for this session.</p>
+{% endfor %}
+
+<h2 id="trends">Trends</h2>
+{% if report.trends %}
+<p class="sub">
+  Session mean with a &plusmn;1 std band, over every session that has metrics. The dotted
+  line marks this session.
+</p>
+<div class="grid">
+  {% for name, figure in report.trends %}
+  <div>{{ figure | safe }}</div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">
+  Nothing to plot yet: trends need at least one session with metrics, and the metrics listed
+  under <code>report.trend_metrics</code> must have values.
+</p>
+{% endif %}
+
+<h2 id="distributions">Distributions</h2>
+{% if report.distributions %}
+<div class="grid">
+  {% for name, figure in report.distributions %}
+  <div>{{ figure | safe }}</div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">No measured swings to plot.</p>
+{% endif %}
+
+{% if report.labels %}
+<h2 id="labels">Label analysis</h2>
+<p class="sub">
+  Cohen's d between your <code>good</code> swings and each other label, per metric, largest
+  effect first. A positive d means the metric is larger on the good swings.
+</p>
+<table>
+  <thead>
+    <tr><th>Label</th><th>Metric</th><th>Unit</th><th>d</th><th>good</th><th>label</th></tr>
+  </thead>
+  <tbody>
+    {% for row in report.labels[:40] %}
+    <tr>
+      <td>{{ row.label }}</td><td>{{ row.metric }}</td><td class="muted">{{ row.unit }}</td>
+      <td>{{ row.d | signed }}</td>
+      <td class="muted">{{ row.n_good }}</td><td class="muted">{{ row.n_label }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if report.clips %}
+<h2 id="clips">Clips</h2>
+<div class="gallery">
+  {% for clip in report.clips %}
+  <figure>
+    <video controls preload="none" src="clips/{{ clip.file }}"></video>
+    <figcaption>
+      <strong>swing {{ clip.swing_id }}</strong> &middot; {{ clip.stroke_type }}
+      &middot; {{ clip.t_contact | number(1) }} s<br>
+      {% for reason in clip.reasons %}<span class="tag">{{ reason }}</span>{% endfor %}
+      {% for label in clip.labels %}<span class="tag">{{ label }}</span>{% endfor %}
+    </figcaption>
+  </figure>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h2 id="diagnostics">Diagnostics</h2>
+{% set d = report.diagnostics %}
+{% if d.ingest_warnings %}
+<div class="note">
+  <strong>Ingest warnings</strong>
+  <ul>{% for w in d.ingest_warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+<table>
+  <thead><tr><th>Check</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td>Contacts detected</td><td>{{ d.contacts if d.contacts is defined else "-" }}</td></tr>
+    <tr>
+      <td>First pass (audio level)</td>
+      <td>{{ d.first_pass_own_hits if d.first_pass_own_hits is defined else "-" }}</td>
+    </tr>
+    <tr><td>Confirmed own hits</td><td>{{ d.confirmed_own_hits }}</td></tr>
+    <tr><td>Far-side swings (not measured)</td><td>{{ d.far_side_swings }}</td></tr>
+    <tr><td>Left/right swaps fixed</td><td>{{ d.swaps }}</td></tr>
+    <tr><td>Player-track resets</td><td>{{ d.track_resets }}</td></tr>
+    <tr>
+      <td>Near player detected</td>
+      <td>
+        {% if d.near_detection_rate is defined %}{{ (d.near_detection_rate * 100) | number(0) }}%
+        {% else %}-{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td>Far player detected</td>
+      <td>
+        {% if d.far_detection_rate is defined %}{{ (d.far_detection_rate * 100) | number(0) }}%
+        {% else %}-{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td>Identities told apart</td>
+      <td>{{ "yes" if d.identity_resolved else "no" }}</td>
+    </tr>
+    <tr>
+      <td>Identity margin (median / min)</td>
+      <td>{{ d.identity_margin_median | number }} / {{ d.identity_margin_min | number }}</td>
+    </tr>
+    {% if d.hits %}
+    <tr>
+      <td>Hits attributed</td>
+      <td>{{ d.hits.self }} you, {{ d.hits.other }} partner, {{ d.hits.unknown }} unknown</td>
+    </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% if d.qc_reasons %}
+<h3>Why swings failed QC</h3>
+<table>
+  <thead><tr><th>Reason</th><th>Swings</th></tr></thead>
+  <tbody>
+    {% for reason, count in d.qc_reasons.items() %}
+    <tr><td>{{ reason }}</td><td>{{ count }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}

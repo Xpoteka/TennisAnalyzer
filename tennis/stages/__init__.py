@@ -16,7 +16,17 @@ from dataclasses import dataclass
 from tennis.config import Config
 from tennis.errors import StageError, TennisError, UserError
 from tennis.session import SOURCE_INPUT, Session
-from tennis.stages import classify, clean, contacts, ingest, labels, metrics, pose
+from tennis.stages import (
+    classify,
+    clean,
+    clips,
+    contacts,
+    ingest,
+    labels,
+    metrics,
+    pose,
+    report,
+)
 from tennis.util.log import log, session_log
 
 
@@ -108,20 +118,22 @@ STAGES: tuple[Stage, ...] = (
     Stage(
         8,
         "clips",
-        ("metrics.parquet",),
-        ("clips",),
-        ("clips", "player"),
+        clips.INPUTS,
+        clips.OUTPUTS,
+        clips.CONFIG_KEYS,
         "M7",
-        optional_inputs=("labels.parquet",),
+        clips.run,
+        optional_inputs=clips.OPTIONAL_INPUTS,
     ),
     Stage(
         9,
         "report",
-        ("metrics.parquet",),
-        ("report.html",),
-        ("report",),
+        report.INPUTS,
+        report.OUTPUTS,
+        report.CONFIG_KEYS,
         "M7",
-        optional_inputs=("labels.parquet",),
+        report.run,
+        optional_inputs=report.OPTIONAL_INPUTS,
     ),
 )
 

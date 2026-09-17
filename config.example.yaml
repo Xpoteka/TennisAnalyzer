@@ -106,6 +106,10 @@ clips:                       # Stage 8
 report:                      # Stage 9
   trend_metrics: [contact_height, contact_forward, knee_flex_min, unit_turn_lead_time]
   rolling_sessions: 5        # Deltas compare against the mean of this many past sessions.
+  metric_direction: {}       # Which way is an improvement, per metric: up | down. Metrics
+                             # left out are shown without a colour, because only you can say
+                             # what "better" means. For example:
+                             #   metric_direction: {contact_forward: up, knee_flex_min: down}
 
 labels:                      # Stage 7: voice labels (optional)
   enabled: true              # Also skippable per run with --no-labels.

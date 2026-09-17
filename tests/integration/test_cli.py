@@ -69,12 +69,20 @@ def test_bad_config_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert "player.handedness" in err
 
 
-def test_unimplemented_command_exits_1(
+def test_trends_without_any_session_exits_1(
     config_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, _, err = _run(["trends", "--config", str(config_file)], capsys)
     assert code == 1
-    assert "M7" in err
+    assert "metrics.parquet" in err
+
+
+def test_trends_rejects_a_bad_since_date(
+    config_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(["trends", "--since", "last week", "--config", str(config_file)], capsys)
+    assert code == 1
+    assert "YYYY-MM-DD" in err
 
 
 def test_list_empty(config_file: Path, capsys: pytest.CaptureFixture[str]) -> None:

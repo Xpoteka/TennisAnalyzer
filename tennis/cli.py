@@ -6,6 +6,7 @@ Exit codes: 0 success, 1 user or config error, 2 stage failure (stage name print
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -37,10 +38,6 @@ ConfigOpt = Annotated[
     Path | None,
     typer.Option("--config", "-c", help="Config YAML (default: ./config.yaml if present)."),
 ]
-
-
-def _not_implemented(command: str, milestone: str) -> NoReturn:
-    raise UserError(f"'tennis {command}' is not implemented yet (planned for {milestone})")
 
 
 def _version_callback(value: bool) -> None:
@@ -112,20 +109,51 @@ def _print_status_table(sessions: list[Session], cfg: Config) -> None:
 
 
 @app.command()
-def report(session_id: str, config: ConfigOpt = None) -> None:
-    """Rebuild the report for one session."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("report", "M7")
+def report(
+    session_id: str,
+    config: ConfigOpt = None,
+    no_clips: Annotated[
+        bool, typer.Option("--no-clips", help="Rebuild only the HTML, keeping the clips.")
+    ] = False,
+) -> None:
+    """Rebuild the clips and the report for one session (stages 8 and 9)."""
+    from tennis.stages import STAGES_BY_NAME, StageContext
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    names = ["report"] if no_clips else ["clips", "report"]
+    for name in names:
+        stage = STAGES_BY_NAME[name]
+        chash = stage.config_hash(cfg)
+        session.clear_stamp(name)
+        inputs = session.fingerprints(stage.all_inputs)
+        assert stage.run is not None
+        stage.run(StageContext(session, cfg, chash, get_logger(), name))
+        session.write_stamp(name, chash, inputs=inputs,
+                            outputs=session.fingerprints(stage.outputs))  # fmt: skip
+    typer.echo(f"wrote {session.path('report.html')}")
 
 
 @app.command()
 def trends(
-    since: Annotated[str | None, typer.Option(help="Only sessions from this date on.")] = None,
+    since: Annotated[
+        str | None, typer.Option(help="Only sessions from this date on (YYYY-MM-DD).")
+    ] = None,
     config: ConfigOpt = None,
+    out: Annotated[
+        Path | None, typer.Option(help="Output HTML (default: <data_root>/report.html).")
+    ] = None,
 ) -> None:
     """Build the cross-session trends report."""
-    load_config(config)
-    _not_implemented("trends", "M7")
+    from tennis.reporting import write_trends_report
+
+    cfg = load_config(config)
+    if since is not None:
+        try:
+            date.fromisoformat(since)
+        except ValueError as exc:
+            raise UserError(f"--since: expected YYYY-MM-DD, got {since!r}") from exc
+    typer.echo(f"wrote {write_trends_report(cfg, since=since, out=out)}")
 
 
 @app.command("pose-preview")

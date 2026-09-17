@@ -170,6 +170,10 @@ class ReportConfig(_Section):
         ]
     )
     rolling_sessions: int = Field(5, ge=1)
+    # Which way is an improvement, per metric: "up" or "down". Metrics left out here get a
+    # delta without a colour, because only the player can say what "better" means for them
+    # (spec section 14, open question).
+    metric_direction: dict[str, Literal["up", "down"]] = Field(default_factory=dict)
 
 
 def _default_vocabulary() -> dict[str, list[str]]:
