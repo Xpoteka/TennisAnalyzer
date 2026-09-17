@@ -320,3 +320,39 @@ def test_read_word_labels(tmp_path: Path) -> None:
     path = tmp_path / "said.csv"
     path.write_text("# what I said\nt,label\n2:03.5,Good\n12,late\n")
     assert read_word_labels(path) == [(12.0, "late"), (123.5, "good")]
+
+
+def test_a_manual_label_is_reported_apart_and_never_scored(
+    tmp_path: Path, data_root: Path, transcript: list[Word]
+) -> None:
+    """It is a hand-written override, not something the transcriber produced."""
+    from tennis.evaluation import evaluate_labels, format_label_eval
+
+    session = _write_session(tmp_path, data_root)
+    transcript += [Word("good", 10.8, 11.0), Word("late", 21.0, 21.2)]
+    manual = tmp_path / "labels" / f"manual_{session.id}.csv"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text("contact_id,label\n2,framed\n")
+    rows = _run(session, _config(data_root, tmp_path))
+    assert len(rows) == 3 and sum(1 for r in rows if r["source"] == "manual") == 1
+
+    ev = evaluate_labels(session, [(11.0, "good"), (21.2, "late")])
+    assert ev.stored == 3 and ev.manual == 1 and ev.scored == 2
+    # The manual row inflates neither the match rate nor the spurious count.
+    assert ev.correct == 2 and ev.spurious == 0
+    assert ev.match_rate == 1.0
+    text = format_label_eval(ev)
+    assert "1 written by hand and not scored" in text
+
+
+def test_read_stroke_labels_honours_the_player_argument(tmp_path: Path) -> None:
+    from tennis.validation import read_stroke_labels
+
+    path = tmp_path / "s.csv"
+    path.write_text("t,player,stroke\n10,self,forehand\n20,other,serve\n30,partner,volley\n")
+    assert read_stroke_labels(path) == [(10.0, "forehand")]
+    assert read_stroke_labels(path, "me") == [(10.0, "forehand")]  # a self alias
+    assert read_stroke_labels(path, "other") == [(20.0, "serve")]
+    assert read_stroke_labels(path, "partner") == [(30.0, "volley")]
+    with pytest.raises(UserError, match="no usable nobody labels"):
+        read_stroke_labels(path, "nobody")

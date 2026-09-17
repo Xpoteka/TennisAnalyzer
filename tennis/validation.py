@@ -163,8 +163,10 @@ def read_stroke_labels(path: Path, player: str = "self") -> list[tuple[float, st
 
     Two shapes are accepted, and the header decides which:
 
-    * the Wingfield export (``t,player,stroke,...``), of which only the rows whose player
-      column says ``self`` are kept;
+    * the Wingfield export (``t,player,stroke,...``), of which only the rows for ``player``
+      are kept. The default, ``self``, also accepts the spellings in ``SELF_VALUES``
+      (``me``, ``you``, ``own``, ...); any other name is matched literally, so a partner's
+      strokes can be scored by passing theirs;
     * a plain ``t,stroke`` file with no player column, where every row is yours.
 
     Stroke names are lower-cased and must be one of the spec's four types.
@@ -182,11 +184,15 @@ def read_stroke_labels(path: Path, player: str = "self") -> list[tuple[float, st
             f"column ({'/'.join(STROKE_COLUMNS[:2])}...); found {', '.join(header)}"
         )
     known = set(STROKE_TYPES)
+    # Asking for "self" - by any of its spellings - accepts every spelling of it, since a
+    # file may say "me" where the caller said "self". Any other name matches literally.
+    name = player.strip().lower()
+    wanted = set(SELF_VALUES) if name in SELF_VALUES else {name}
     labels: list[tuple[float, str]] = []
     skipped = 0
     for row in rows[1:]:
         try:
-            if player_col is not None and row[player_col].strip().lower() not in SELF_VALUES:
+            if player_col is not None and row[player_col].strip().lower() not in wanted:
                 continue
             t = parse_time(row[time_col])
             stroke = row[stroke_col].strip().lower()

@@ -12,6 +12,10 @@ Two failure modes are reported apart, because they have different fixes: a word 
 transcriber never produced (or that landed outside the tolerance) is a *miss*, and a word
 that produced the wrong vocabulary entry is a *confusion*. Stored labels with no truth
 word behind them are *spurious*.
+
+Only ``voice`` labels are scored. A manual label is a hand-written override, not something
+the transcriber produced, so counting it either way would misreport the transcription: it
+is reported on its own line instead.
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ DEFAULT_TOLERANCE_S = 2.0
 class LabelEval:
     session_id: str
     spoken: int
-    stored: int
+    stored: int  # every row in labels.parquet, voice and manual
+    manual: int  # of those, hand-written overrides: never scored, they are not transcribed
     matched: int  # a stored label was found near the spoken word
     correct: int  # ... and it was the right label
     spurious: int  # stored labels with no spoken word near them
@@ -42,6 +47,11 @@ class LabelEval:
     swings_labelled: int
     tolerance_s: float
     target: float = 0.80
+
+    @property
+    def scored(self) -> int:
+        """Voice labels, the only ones this evaluation can score."""
+        return self.stored - self.manual
 
     @property
     def match_rate(self) -> float:
@@ -104,6 +114,7 @@ def evaluate_labels(
         session_id=session.id,
         spoken=len(spoken),
         stored=len(stored),
+        manual=len(stored) - len(voice),
         matched=matched,
         correct=matrix.correct,
         spurious=len(voice) - len(used),
@@ -117,7 +128,13 @@ def format_label_eval(ev: LabelEval, markdown: bool = False) -> str:
     m = ev.matrix
     summary = [
         f"session {ev.session_id}: {ev.spoken} spoken label words, {ev.stored} stored labels "
-        f"on {ev.swings_labelled} swing(s), tolerance {ev.tolerance_s:g}s",
+        f"on {ev.swings_labelled} swing(s)"
+        + (
+            f" ({ev.manual} written by hand and not scored, {ev.scored} from the transcriber)"
+            if ev.manual
+            else ""
+        )
+        + f", tolerance {ev.tolerance_s:g}s",
         f"matched {ev.correct}/{ev.spoken} correctly ({ev.match_rate:.1%}; "
         f"{'meets' if ev.meets_target else 'does not meet'} the {ev.target:.0%} target)",
         f"{ev.missed} never transcribed or too far off, {ev.confused} heard as another "
