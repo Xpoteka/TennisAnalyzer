@@ -589,3 +589,49 @@ def test_slow_motion_lowers_the_clip_frame_rate(
     clips.run(StageContext(session, config, "h", get_logger(), "clips"))
     index = json.loads(session.path(clips.INDEX_NAME).read_text())
     assert index["fps"] == pytest.approx(7.5) and index["slow_motion"] is True
+
+
+# --- regressions ------------------------------------------------------------------------------
+
+
+def test_trends_handles_a_metric_that_is_nan_throughout(tmp_path: Path, data_root: Path) -> None:
+    """DuckDB's stddev_samp raises on an all-NaN group, and every stroke type has one:
+    the metrics that do not apply to it."""
+    from tennis.reporting import trend_table
+
+    rows = [_metric_row(i, "volley", 1.0 + i) for i in range(3)]
+    for row in rows:
+        # unit_turn_lead_time applies to groundstrokes only.
+        row["unit_turn_lead_time"] = float("nan")
+    session = _write_session(tmp_path, data_root, rows=rows)
+    table = trend_table(_config(data_root))
+    assert table
+    assert all(r["unit_turn_lead_time_count"] == 0 for r in table)
+    assert all(r["unit_turn_lead_time_mean"] is None for r in table)
+    assert np.isfinite(float(table[0]["contact_height_mean"]))
+    # And the report built on top of it still renders.
+    assert 'id="trends"' in _build_report(session, data_root)
+
+
+def test_report_survives_a_keypoints_file_without_the_usual_columns(
+    tmp_path: Path, data_root: Path
+) -> None:
+    """A diagnostic must never take the whole report down."""
+    session = _write_session(tmp_path, data_root)
+    pq.write_table(
+        pa.table({"frame_idx": np.zeros(3, np.int64), "slot": ["near"] * 3}),
+        session.path("keypoints.parquet"),
+    )
+    html = _build_report(session, data_root)
+    assert 'id="diagnostics"' in html
+    assert "Near player detected" in html  # shown as "-"
+
+
+def test_metrics_stage_names_the_columns_it_is_missing(tmp_path: Path, data_root: Path) -> None:
+    session = _write_session(tmp_path, data_root)
+    pq.write_table(
+        pa.table({"swing_id": np.zeros(2, np.int64), "t_rel": np.zeros(2)}),
+        session.path("swings.parquet"),
+    )
+    with pytest.raises(UserError, match="l_wrist_speed"):
+        metrics.run(StageContext(session, _config(data_root), "h", get_logger(), "metrics"))

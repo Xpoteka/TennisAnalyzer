@@ -472,7 +472,14 @@ def load_swings(
     """Every swing in ``swings.parquet`` as a ``SwingFrame``, keyed by ``swing_id``."""
     columns = ["swing_id", "t_rel", "l_wrist_speed", "r_wrist_speed"]
     columns += [f"{name}_{axis}" for name in KEYPOINT_NAMES for axis in ("x", "y")]
-    table = pq.read_table(session.path("swings.parquet"), columns=columns)
+    path = session.path("swings.parquet")
+    missing = [c for c in columns if c not in set(pq.read_schema(path).names)]
+    if missing:
+        raise UserError(
+            f"{path.name} is missing columns: {', '.join(missing)}; it was written by an "
+            "older version of stage 4, so rerun with --from-stage 4"
+        )
+    table = pq.read_table(path, columns=columns)
     data = {name: table.column(name).to_numpy(zero_copy_only=False) for name in columns}
     ids = np.asarray(data["swing_id"], np.int64)
     order = np.argsort(ids, kind="stable")

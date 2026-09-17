@@ -10,17 +10,19 @@ The pipeline is a fixed sequence of stages. Each stage reads files from the sess
 | 2 | contacts | `audio.wav`, `metadata.json`, `frame_times.parquet` | `contacts.parquet` | audio | **M2 (done, needs tuning)** |
 | 3 | pose | `contacts.parquet`, `frame_times.parquet`, `metadata.json`, source video | `keypoints.parquet` | pose, windows | **M3 (done, pending review)** |
 | 4 | clean | `keypoints.parquet`, `contacts.parquet`, `frame_times.parquet` | `swings.parquet`, `swing_info.parquet` | player, cleaning, windows, `pose.kp_conf_min`, `pose.contacts`, `audio.wrist_confirm_*` | **M4 (done)** |
-| 5 | classify | `swings.parquet` | `swings.parquet` | player, classify | M5 |
-| 6 | metrics | `swings.parquet` | `metrics.parquet` | player, metrics | M6 |
-| 7 | labels (optional) | `audio.wav`, `contacts.parquet` | `labels.parquet` | labels | M8 |
-| 8 | clips | `metrics.parquet` | `clips/` | clips, player | M7 |
-| 9 | report | `metrics.parquet` | `report.html` | report | M7 |
+| 5 | classify | `swings.parquet`, `swing_info.parquet`, `keypoints.parquet`, `metadata.json` | `strokes.parquet` | player, classify | **M5 (done)** |
+| 6 | metrics | `swings.parquet`, `swing_info.parquet`, `strokes.parquet` | `metrics.parquet`, `metrics_summary.parquet` | player, metrics | **M6 (done)** |
+| 7 | labels (optional) | `audio.wav`, `contacts.parquet`, `swing_info.parquet`, `metadata.json` | `labels.parquet` | labels | **M8 (done)** |
+| 8 | clips | source video, `metrics.parquet`, `swings.parquet`, `swing_info.parquet`, `strokes.parquet`, `frame_times.parquet`, `metadata.json` (+ optional `labels.parquet`) | `clips/index.json` and `clips/*.mp4` | clips, player, `pose.hwaccel`, `pose.kp_conf_min` | **M7 (done)** |
+| 9 | report | `metrics.parquet`, `metrics_summary.parquet`, `swing_info.parquet`, `strokes.parquet`, `metadata.json` (+ optional `labels.parquet`, `clips/index.json`, `players.json`, `keypoints.parquet`) | `report.html` | report, player | **M7 (done)** |
 
 The registry lives in `tennis/stages/__init__.py`. The runner (`run_pipeline`) processes the stages in order:
 
 1. It skips stages that are up to date.
-2. It stops at the first stage that is not implemented yet.
+2. It stops at the first stage that is not implemented yet. Every stage is implemented now, so this only matters for a stage added later.
 3. It wraps any exception in `StageError`, so the CLI exits with code 2 and prints the stage name.
+
+**Optional inputs.** A stage may declare `optional_inputs`: files it uses when they exist. They are not required to run it, but the stage is stale when one appears, changes or disappears. That is how switching the voice labels on rebuilds the clips and the report without `--force`, while a session with no labels still runs.
 
 ## Caching
 
@@ -44,6 +46,8 @@ A stage is **stale** in any of these cases:
 For the source video, the check follows the symlink to the raw file. Stamps written before fingerprints existed fall back to the older rule: an input is newer than the oldest output.
 
 **Unchanged results don't trigger reruns.** When a stage rewrites an output with identical content, the file keeps its old modification time. For Parquet, "identical" means equal data; files of other types must be byte-identical. Downstream stages therefore don't rerun. For example, re-tuning contact detection in a way that yields the same onsets doesn't repeat the slow pose stage.
+
+For this comparison **two NaNs count as equal** (`tennis.util.io.same_data`). Arrow follows IEEE 754, where they do not, but a keypoint that was never tracked or a metric that does not apply is the same result on the next run. Without this, every stage that writes NaN — stage 4 and stage 6 — would invalidate the stages after it on every rerun.
 
 The runner deletes a stage's stamp before running it. Outputs are written to a temporary file and then renamed into place. Together, these mean a crashed run never looks finished.
 
@@ -198,13 +202,141 @@ A frame is **valid** when the player is detected and the racket-side shoulder, e
 
 `tennis eval-contacts` scores the stored flags against labels and sweeps these settings. `tennis swing-plots` plots raw vs cleaned trajectories. Tuning results are in `docs/validation/M4_cleaning.md`.
 
+### `strokes.parquet` (schema_version 1)
+
+One row per swing, joined to everything else on `swing_id`.
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `swing_id`, `contact_id`, `t_contact` | int64, int64, float64 | Identifiers and the contact time |
+| `stroke_type` | string | `serve`, `forehand`, `backhand`, `volley`, or null when the swing was not classified |
+| `two_handed` | bool | Both wrists within `classify.two_handed_max_dist` at contact; null when the other wrist is not tracked |
+| `classifier_version`, `rule` | string | Which classifier ran, and which rule fired (or why the swing was skipped) |
+| `player_side`, `handedness` | string | The side you were on, and your racket hand |
+| `racket_wrist_x/_y`, `other_wrist_x/_y`, `nose_y` | float64 | The normalized positions at contact the rules used |
+| `wrist_travel` | float64 | Racket-wrist path length over the 0.5 s before contact |
+| `wrist_gap` | float64 | Distance between the wrists at contact |
+| `bbox_bottom_y` | float64 | Player's box bottom as a fraction of the image height |
+
+Only swings that are `is_self_confirmed`, `qc_pass` and `player_side == "near"` are classified. The rest keep their row with a null `stroke_type` and the reason in `rule`, so joins stay total.
+
+**The rules, in order** (normalized units: y up, origin at the hip midpoint at contact, one unit = the median torso length):
+
+1. **serve** — the racket wrist is more than `serve_wrist_above_nose` above the nose;
+2. **volley** — the racket wrist travelled less than `volley_travel_max` in the 0.5 s before contact **and** the box bottom is above `volley_bbox_bottom_max_y` (the player is near the net);
+3. **forehand** — the racket wrist is on the racket-hand side of the hip midpoint. Normalized x is image x, so from behind the baseline a right-handed player's forehand has `racket_wrist_x > 0` and a left-handed player's has `racket_wrist_x < 0`;
+4. **backhand** — anything else.
+
+`player.camera_side: side_on` is rejected with an error: rule 3 assumes the camera is behind the baseline, and the side-on rule is not specified.
+
+Classifiers go through a registry (`classify.classifier`, `rule` built in), the same pattern as the pose backends, so a learned classifier can replace the rules without touching anything else. `tennis eval-classifier` scores the stored types against labelled shots.
+
+### `metrics.parquet` and `metrics_summary.parquet` (schema_version 1)
+
+`metrics.parquet` has one row per swing that is yours, passes QC, is on the near side and got a stroke type: `swing_id`, `contact_id`, `t_contact`, `stroke_type`, `two_handed`, one float64 column per registered metric, and `outlier_score` / `is_outlier`. A metric is NaN when it does not apply to that stroke type or could not be computed.
+
+`metrics_summary.parquet` has one row per stroke type per metric: `count`, `mean`, `std` (the spec's "consistency"), `median`, `p10` and `p90`. **The aggregates live in their own file** rather than in the report stage, so `tennis trends` and the delta columns read them off disk instead of recomputing them per session. A metric with no finite value gets no summary row.
+
+Metrics are registered functions in `tennis/stages/metrics.py`; see "Adding a metric" in the README. The ones that ship:
+
+| Metric | Applies to | Unit | Meaning |
+|--------|-----------|------|---------|
+| `contact_height` | all | torso | Racket wrist above the ground (ankle midpoint) at contact |
+| `contact_forward` | all | torso | Racket wrist up-court of the body centre at contact, times `player.forward_sign` |
+| `contact_lateral` | all | torso | Racket wrist to the racket-hand side of the body centre |
+| `contact_reach` | all | torso | Shoulder-to-wrist distance at contact |
+| `elbow_angle_contact` | all | deg | Shoulder–elbow–wrist angle at contact; 180 is straight |
+| `elbow_angle_min` | all | deg | Smallest elbow angle in the 0.5 s before contact |
+| `knee_flex_min` | all | deg | Deepest knee bend of the swing (mean of both knees) |
+| `knee_flex_contact` | all | deg | Mean knee angle at contact |
+| `peak_wrist_speed` | all | torso/s | Highest racket-wrist speed in the window |
+| `peak_speed_offset` | all | s | When that peak happened, relative to contact |
+| `shoulder_turn_proxy_min` | serve, forehand, backhand | ratio | Narrowest apparent shoulder width, over its width at `t_rel = −1.0` |
+| `unit_turn_lead_time` | forehand, backhand | s | How long before contact that ratio first drops below `metrics.unit_turn_ratio` |
+| `follow_through_height` | serve, forehand, backhand | torso | Racket wrist above the hips at the end of the window |
+| `torso_lean_contact` | all | deg | Tilt of the hip-to-shoulder line from vertical, towards the racket side |
+
+> **The spec's section 6.6 table was not available in this repository.** The list above is built from the metric names the config and the handoff already referenced, plus the closely related ones the same geometry supports. Reconcile it with the spec before the next milestone; adding or renaming a metric is one edit in `tennis/stages/metrics.py`.
+
+#### The forward/height convention
+
+```
+                       net (up the court)
+                            ^
+   camera behind the       |          Moving up the court and moving UP both
+   baseline, raised   ->   |          make image y SMALLER, so both raise the
+                           |          normalized y. One camera cannot tell
+        o  <- contact      |          them apart.
+       /|\                 |
+       / \                 |
+    ---+-------------------+---  the player, seen from behind
+```
+
+Because a single camera behind the baseline projects court depth and height onto the same image axis, the two metrics are referenced differently so that each is still meaningful on its own:
+
+- **`contact_height`** is measured from the ground: the racket wrist's normalized y minus the ankle midpoint's y.
+- **`contact_forward`** is measured from the body centre: the racket wrist's normalized y minus the hip midpoint's y, multiplied by `player.forward_sign` (`-1` for a mirrored setup).
+
+They remain correlated. That is a property of the camera, not of the code — the outlier distance uses a ridge-regularized covariance so it copes. **Check this against real Wingfield frames before trusting `contact_forward` as a depth measure**, and raise it with the product owner (open question 7).
+
+#### Outliers
+
+Per stroke type, the swings with all of `metrics.outlier_metrics` finite are scored by Mahalanobis distance from that group's mean. The covariance gets a ridge of `metrics.outlier_ridge` times its mean variance before inversion, so a collinear or degenerate set of metrics still produces finite distances. Below `metrics.min_swings_for_covariance` swings the covariance is not worth estimating, so each column is standardized and the plain Euclidean norm is used instead. Swings **strictly above** the `metrics.outlier_percentile` of their group's scores are flagged; the strict comparison matters because with a flat score distribution the percentile equals every score. Nothing samples and nothing uses a random state, so two runs produce byte-identical files (a test checks this).
+
+### `labels.parquet` (schema_version 1)
+
+One row per label. Stage 7 is optional (`labels.enabled`, `--no-labels`).
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `swing_id`, `contact_id` | int64 | The swing the label belongs to |
+| `label` | string | The vocabulary entry (`good`, `late`, …) |
+| `word` | string | The spoken word it came from; empty for a manual label |
+| `t_word` | float64 | When the word was said, on the PTS timeline |
+| `t_contact` | float64 | The contact it was attached to |
+| `confidence` | float64 | The transcriber's word probability; NaN for a manual label |
+| `source` | string | `voice` or `manual` |
+
+The audio is transcribed with word timestamps, each word is normalized (lower-cased, punctuation stripped) and looked up in `labels.vocabulary`, and the match is attached to the latest **confirmed** own contact within `labels.max_delay_s` before it. Whisper timestamps are WAV time, so `audio_start_s` is added to put them on the PTS timeline. Words that map to nothing, and words with no own hit before them, are logged with the reason and dropped.
+
+`<paths.labels_dir>/manual_<session>.csv` (`contact_id,label`) overrides the voice labels for the same contact. A contact id that is not a confirmed own hit is an error, not a silent drop. That file is not a declared stage input, so add or edit it and rerun with `--from-stage 7`.
+
+Transcription goes through a registry (`labels.backend`, `faster_whisper` built in); the model is downloaded to `<data_root>/models/whisper` rather than `~/.cache`. Tests register a backend that returns a fixed word list, so no model is ever loaded in CI. `tennis eval-labels` scores the stored labels against a CSV of what was actually said.
+
+### `clips/index.json` and `clips/*.mp4`
+
+`clips/index.json` is stage 8's **declared output** — not the directory. A directory's modification time changes whenever any file inside it does, which the fingerprint cache would read as a permanent change. It records the session, the playback rate, and per clip: `swing_id`, `t_contact`, `stroke_type`, `reasons`, `labels`, `metrics`, `file`, `start_s`, `end_s`, `frames` and `rendered` (plus `error` when one clip failed).
+
+Which swings get a clip:
+
+- every outlier;
+- the swing closest to the median of each stroke type (metrics standardized first, so degrees do not outweigh torso lengths; ties break on the lower swing id, so the choice is stable);
+- every labelled swing, at most `clips.max_per_label` per label.
+
+A swing picked by more than one rule is rendered once and lists every reason. Clips no longer selected are deleted on the next run. Each frame carries the skeleton (racket side coloured), the stroke type, the labels and a few metrics; the contact frame gets a red border. `clips.slow_motion` writes the same frames at `fps × clips.slow_motion_rate`.
+
+### `report.html`
+
+One self-contained file. Plotly's script is inlined once and every figure is rendered without its own copy, so the page opens offline with no network and no sibling files; the clips are linked by relative path, so the report and its `clips/` folder travel together. The sections are the ones spec section 6.9 lists: session summary, metrics per stroke type, trends, distributions, label analysis, the clip gallery and diagnostics.
+
+**Deltas.** The metrics table compares this session's mean with the mean of the last `report.rolling_sessions` sessions that have metrics. A delta is coloured green or red **only** for the metrics listed under `report.metric_direction` (`up` or `down`). For every other metric the direction that counts as an improvement has not been decided (open question 7), so the change is shown without a judgement.
+
+**Cross-session data** comes from DuckDB over `data/sessions/*/metrics.parquet`, read with `read_parquet(glob, filename = true)` so each row knows its session. There is a plain-Python fallback for the case where DuckDB cannot be imported; a test holds the two to the same answers. `tennis trends` writes the same figures for every session to `<data_root>/report.html`.
+
+**Label analysis** (after M8) lists Cohen's d between the `good` swings and each other label, per metric, largest effect first.
+
 ### `audio.wav`
 
 Mono, 16-bit PCM, 48 kHz, decoded from the first audio stream. It is written with `-bitexact`, so repeated runs produce identical files.
 
-The schemas for the later stage outputs are in spec section 6. They will be documented here as each stage is built.
+## Changes from the spec
 
-## Open design points for later milestones
+Each of these is also listed in `docs/HANDOFF.md` §2, with the data that justified it.
 
-- **Resolved in M4: `is_self_confirmed` lives in `swing_info.parquet`, not in `contacts.parquet`.** The spec writes it back into `contacts.parquet`, which stages 3 and 4 read. In `contacts.parquet` the column stays null.
-- **Stage 5 modifies `swings.parquet` in place.** A file cannot be both an input and an output under mtime caching. Proposed fix: stage 5 writes a separate `strokes.parquet`, and readers join it on `swing_id`.
+- **`is_self_confirmed` lives in `swing_info.parquet`, not in `contacts.parquet`** (M4). The spec writes it back into `contacts.parquet`, which stages 3 and 4 read, so the cache would call them stale forever. In `contacts.parquet` the column stays null.
+- **Stage 5 writes `strokes.parquet` instead of rewriting `swings.parquet` in place** (M5), for the same reason: a file cannot be both an input and an output under fingerprint caching. Readers join on `swing_id`.
+- **The aggregates live in `metrics_summary.parquet`** (M6), so the report and the trends read them instead of recomputing them.
+- **`clips/index.json` is stage 8's output, not the `clips/` directory** (M7).
+- **`report.metric_direction` is opt-in** (M7). Without it, deltas are shown but not judged.
+- **Metrics needed a registry with `applies_to`** (M6), because the four stroke types do not share every metric.
+- **Stages may declare optional inputs** (M8), so the optional voice-label stage can feed the clips and the report without making them fail when it is skipped.

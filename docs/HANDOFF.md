@@ -1,6 +1,8 @@
-# Developer handoff: state of the project and plan for M5–M8
+# Developer handoff: state of the project
 
-*Written 2026-09-17, at the end of M4. Read this first, then [ARCHITECTURE.md](../ARCHITECTURE.md) (how the stages fit together, data schemas, caching) and the [README](../README.md) (setup and CLI). The product spec, "Tennis Technique Analyzer: Software Specification v1.0", is the source of requirements; section numbers below (§6.5 and so on) refer to it.*
+*Written 2026-09-17 at the end of M4, updated at the end of M8. Read this first, then [ARCHITECTURE.md](../ARCHITECTURE.md) (how the stages fit together, data schemas, caching) and the [README](../README.md) (setup and CLI). The product spec, "Tennis Technique Analyzer: Software Specification v1.0", is the source of requirements; section numbers below (§6.5 and so on) refer to it.*
+
+**Every stage of the pipeline is now built (M1–M8).** What remains is validation on real footage and the cross-cutting work in §3 — and all of it is blocked on recordings that do not exist yet (§6). Read §1, then §6.
 
 ---
 
@@ -14,12 +16,14 @@
 | M2 | Contact detection and tuning tool | Merged (PR #2) | **Open.** Needs about 100 frame-accurate own-hit labels from a clip-on-mic session (§10.3). Only coarse Wingfield labels exist so far. |
 | M3 | Pose extraction, player selection, review video | Merged (PR #3) | Visual review by the product owner (PO). 97% of frames tracked on 20 Wingfield swings. No formal sign-off yet. |
 | M4 | Cleaning, normalization, QC, confirmation, two-player identity | Merged (PR #4) | QC pass rate 86% for near-side own hits (target ≥ 80%). Trajectory plots done. See `docs/validation/M4_cleaning.md`. |
-| M5 | Stroke classification and eval tool | Not started | ≥ 90% accuracy (§10.3) |
-| M6 | Metrics, aggregation, outliers | Not started | All §6.6 metrics implemented, unit-tested, and identical across reruns |
-| M7 | Clips and HTML report with trends | Not started | Report opens offline and shows every §6.9 section, with ≥ 3 sessions |
-| M8 | Voice labels and label analysis | Not started | ≥ 80% of spoken label words matched correctly |
+| M5 | Stroke classification and eval tool | Built | **Open.** `tennis eval-classifier` exists and is tested; the ≥ 90% accuracy number has never been measured, because it needs the Wingfield stroke labels run against a session whose pose is up to date. |
+| M6 | Metrics, aggregation, outliers | Built | Metrics implemented with one unit test each, and a determinism test that requires byte-identical Parquet across reruns. **Caveat: the spec's §6.6 table was not in the repository**, so the metric list was reconstructed — see below. |
+| M7 | Clips and HTML report with trends | Built | **Open.** The report opens offline and has every §6.9 section, but "with ≥ 3 sessions" cannot be shown: only two sessions exist and one has no pose. |
+| M8 | Voice labels and label analysis | Built | **Open.** `tennis eval-labels` exists and is tested on synthetic transcripts; the ≥ 80% match rate needs a session recorded with the words spoken. |
 
-Start M5 from an up-to-date `main`.
+**The §6.6 metric table was missing.** No copy of the spec is in the repository, so stage 6 ships the metrics that the config and this document already named (`contact_height`, `contact_forward`, `elbow_angle_contact`, `knee_flex_min`, `peak_wrist_speed`, `peak_speed_offset`, `shoulder_turn_proxy_min`, `unit_turn_lead_time`) plus the closely related ones the same geometry supports, fourteen in all; they are listed in ARCHITECTURE.md. **Reconcile that list against §6.6 before calling M6 accepted.** Adding, renaming or dropping one is a single edit in `tennis/stages/metrics.py`.
+
+There is also a real limit worth raising with the PO: with one camera behind the baseline, court depth and height project onto the same image axis, so `contact_forward` and `contact_height` cannot be separated. They are referenced differently (ground vs body centre) so each is meaningful, but `contact_forward` is not a depth measurement. ARCHITECTURE.md has the drawing.
 
 ### Codebase in one page
 
@@ -34,6 +38,13 @@ tennis/
   stages/contacts.py    2: contacts.parquet; tune_contacts(); LabelSpec / LabelScorer
   stages/pose.py        3: keypoints.parquet (near and far slots, appearance descriptors)
   stages/clean.py       4: swings.parquet, swing_info.parquet, players.json
+  stages/classify.py    5: strokes.parquet; Classifier protocol, RuleClassifier, registry
+  stages/metrics.py     6: metrics.parquet, metrics_summary.parquet; @metric registry, SwingFrame
+  stages/labels.py      7: labels.parquet; Transcriber registry, faster-whisper, word matching
+  stages/clips.py       8: clips/index.json and clips/*.mp4; which swings are worth a clip
+  stages/report.py      9: report.html (a thin wrapper around reporting.py)
+  reporting.py          session and trends HTML; DuckDB over every session's metrics
+  templates/            jinja2: base.html.j2, report.html.j2, trends.html.j2
   pose_backends/        PoseBackend protocol, registry, YOLO backend
   util/audio.py         onset detection (chunked; spectral flux)
   util/frames.py        FrameReader (ffmpeg subprocess plus showinfo PTS), window merging
@@ -46,13 +57,13 @@ tennis/
   util/overlay.py       draw_pose, draw_label, VideoWriter (H.264 through ffmpeg)   (M7 clips)
   util/io.py            atomic writes; write_parquet with provenance; keeps mtime on identical rewrites
   util/video.py         ffprobe/ffmpeg wrappers, frame PTS, nearest_frames
-  evaluation.py         eval-contacts (scores stored flags, sweeps confirmation settings)
-  review.py             pose-preview, swing-plots, players thumbnails
+  evaluation/           one module per eval command: contacts.py, strokes.py, labels.py
+  review.py             pose-preview, swing-plots, players thumbnails, inspect
   validation.py         label CSV parsing, parse_time, match_events (with label windows), read_segments
 scripts/wingfield_labels.py   Wingfield .xlsx export → label CSVs
 ```
 
-About 5,400 lines of code, and 172 tests (`uv run pytest`, about 8 s, no network, no real model). The same checks run in CI: ruff, ruff format, and mypy in strict mode.
+About 8,700 lines of code, and 272 tests (`uv run pytest`, about 11 s, no network, no real model, no whisper). The same checks run in CI: ruff, ruff format, and mypy in strict mode.
 
 ### Data you can use
 
@@ -69,7 +80,7 @@ The PO (the player) is **left-handed** and wore an orange shirt in the Wingfield
 ## 2. Changes from the spec so far (keep them, or discuss with the PO)
 
 1. **`is_self_confirmed` lives in `swing_info.parquet`, not in `contacts.parquet`.** Writing it back would make stages 3 and 4 stale forever.
-2. **Stage 5 must not rewrite `swings.parquet` in place,** for the same reason. See M5 below.
+2. **Stage 5 writes `strokes.parquet` instead of rewriting `swings.parquet` in place,** for the same reason. Readers join on `swing_id`.
 3. **Two-player identity is added,** although §1.2 lists re-identification as a non-goal. Sessions have a partner and the players change ends. Without it, 30% of the Wingfield match measured the partner as "you". Far-side swings are detected but **not measured**; this was the PO's choice.
 4. **Handedness `auto`** (default) and **identity `auto`**: louder clip-mic hits, otherwise the near player at the start. `player.identity: A|B` overrides it.
 5. **Confirmation rule:** the highest *local* wrist-speed peak within ±0.2 s must reach 6 torso lengths/s. It uses the *faster* wrist, because left/right labels are unreliable from behind.
@@ -81,14 +92,22 @@ The PO (the player) is **left-handed** and wore an orange shirt in the Wingfield
    - config hashes are per stage and per field, not per file mtime;
    - stamps store input and output fingerprints (mtime and size);
    - identical rewrites keep their old mtime so reruns don't cascade;
+   - for that comparison two NaNs count as equal, unlike Arrow's own equality; without this every stage that writes NaN (4 and 6) would invalidate its successors on every rerun;
+   - stages may declare **optional inputs**: files they use when present, whose appearance or disappearance still makes the stage stale;
    - **code changes don't invalidate anything** (see §4).
 9. **No PyAV.** On macOS its bundled FFmpeg clashes with OpenCV's (which Ultralytics requires). Frames are decoded by an `ffmpeg` subprocess.
 10. **Ultralytics is a core dependency** (AGPL-3.0). The backend stays swappable through the registry.
 11. `ingest` also writes `frame_times.parquet`. Frame index `i` means row `i` of this file, always.
+12. **Per-stroke-type aggregates live in `metrics_summary.parquet`** (M6), so the report and `tennis trends` read them rather than recomputing them.
+13. **`clips/index.json` is stage 8's output, not the `clips/` directory** (M7): a directory's mtime changes whenever any file in it does.
+14. **Report deltas are not judged unless asked** (M7). `report.metric_direction` opts a metric into a green/red delta; everything else shows the change without a verdict, because which way is better is open question 7.
+15. **`contact_forward` cannot be a true depth measurement** from one camera behind the baseline (M6). It and `contact_height` use different references so each is meaningful, but they stay correlated. ARCHITECTURE.md has the drawing the plan asked for.
+16. **Three registries follow the pose-backend pattern:** stroke classifiers (`classify.classifier`), transcription backends (`labels.backend`) and metrics (`@metric`).
+17. **New dependencies:** `jinja2` and `duckdb` for the report, `faster-whisper` for the voice labels. The whisper model is cached under `<data_root>/models/whisper`, not `~/.cache`.
 
 ---
 
-## 3. Plan for the remaining milestones
+## 3. What each milestone shipped, and what is still open
 
 The general rules for every new stage are in the README under "Adding a stage":
 
@@ -98,186 +117,69 @@ The general rules for every new stage are in the README under "Adding a stage":
 - when one swing is bad, log it, mark it and continue;
 - add tests with synthetic data (no real model, no network).
 
-After adding a stage, set `run=` in `STAGES`. Tests derive the expected stage list from the registry (`implemented_stages()` in `tests/conftest.py`), so the older tests keep passing.
+Tests derive the expected stage list from the registry (`implemented_stages()` in `tests/conftest.py`), so adding a stage does not break the older tests.
 
-### M5: stroke classification (§6.5), about 4–5 days
+### M5: stroke classification (§6.5)
 
-**Registry change:** stage 5 reads `swings.parquet` and `swing_info.parquet` and **writes `strokes.parquet`**, one row per swing: `swing_id`, `stroke_type`, `two_handed`, `classifier_version`, and the features it used. Downstream readers join on `swing_id`. Update the `Stage(5, …)` entry and ARCHITECTURE.md.
+Stage 5 reads `swings.parquet`, `swing_info.parquet`, `keypoints.parquet` and `metadata.json`, and writes **`strokes.parquet`**, one row per swing. It does *not* rewrite `swings.parquet`: that file is its own input, so rewriting it would make the stage permanently stale.
 
-**Classifier interface** (`tennis/stages/classify.py`):
+`RuleClassifier` implements the spec's cascade (serve → volley → forehand → backhand), with the forehand sign taken from `resolved_handedness()`, and marks two-handed strokes from the gap between the wrists. Classifiers go through a registry (`classify.classifier`), so a gradient-boosting classifier plugs into the same `Classifier` protocol later. `player.camera_side: side_on` is rejected with a clear error, as planned.
 
-```python
-class Classifier(Protocol):
-    version: str
-    def classify(self, swing: SwingFeatures) -> StrokeResult: ...
+The box bottom the volley rule needs comes from `keypoints.parquet` (`bbox_y2` of the swing's slot at the contact frame), with the lowest cleaned keypoint as a fallback, rather than being added to `swings.parquet` — that would have meant rerunning stage 4.
+
+**Still open:** the ≥ 90% accuracy number. Run it against the Wingfield stroke labels:
+
+```bash
+uv run tennis eval-classifier 2025-01-10_wingfield --config /tmp/wingfield.yaml \
+  --labels labels/strokes_2025-01-10_wingfield.csv \
+  --label-offset 1 --label-resolution 1 --segments labels/rallies_2025-01-10_wingfield.csv \
+  --report docs/validation/M5_classifier.md
 ```
 
-`SwingFeatures` holds the per-swing values the rules need, computed once from `swings.parquet`:
+Expect the known risks to show: 30 fps and about 230 px of player make wrist positions noisy, serves are easy, volleys are rare and their rule is fragile, and Wingfield merges forehand and backhand volleys the way the spec does.
 
-- racket and non-racket wrist positions at contact;
-- nose height;
-- wrist travel before contact;
-- the player's box bottom as a fraction of image height (from `keypoints.parquet`: near slot at the contact frame, or add it to `swings.parquet`);
-- `player_side`.
+### M6: metrics (§6.6)
 
-Keep `RuleClassifier` as the v1 implementation. A later gradient-boosting classifier plugs into the same interface. Add a small registry, the same pattern as the pose backends.
+Stage 6 reads `swings.parquet`, `swing_info.parquet` and `strokes.parquet`, and writes `metrics.parquet` (one row per measured swing) and `metrics_summary.parquet` (count, mean, std, median, p10, p90 per stroke type and metric). The summary is its own file so the report and `tennis trends` read the aggregates instead of recomputing them.
 
-**Rules, evaluated in order** (normalized units: y up, origin at the hip midpoint):
+Metrics are registered functions of `(SwingFrame, racket side)`; `SwingFrame` has `at()`, `between()`, `contact` and `speed()`. Adding one is a single edit. Each has a unit test on hand-built geometry with a known answer, and a test fails if a registered metric has none.
 
-1. **Serve:** racket wrist y > nose y + `serve_wrist_above_nose`.
-2. **Volley:**
-   - the racket wrist's path length over [−0.5, 0] s is below `volley_travel_max`,
-   - **and** the box bottom is above `volley_bbox_bottom_max_y` (the player is near the net).
-3. **Forehand:** the racket wrist is on the racket-hand side of the hip midpoint. **The sign matters:**
-   - normalized x equals image x (not mirrored). From behind the baseline, the player's right is image right;
-   - right-handed: forehand when `wrist_x > 0`; left-handed: when `wrist_x < 0`;
-   - `camera_side: side_on` needs a different rule, so reject it with a clear error until it's specified;
-   - use `resolved_handedness()` from `stages/clean.py` (it reads `players.json`).
-4. **Backhand:** otherwise.
-5. **Two-handed:** the non-racket wrist is within `two_handed_max_dist` of the racket wrist at contact.
+Outliers use a Mahalanobis distance per stroke type over `metrics.outlier_metrics`, with a ridge on the covariance and a standardized-Euclidean fallback below `metrics.min_swings_for_covariance` swings. Nothing samples, so reruns are identical — the determinism test compares the Parquet bytes.
 
-Classify only swings with `is_self_confirmed`, `qc_pass` and `player_side == "near"`. Write `stroke_type = null` for the rest, rather than dropping the rows.
+**Still open:** reconcile the metric list against §6.6 (see §1), and check `contact_forward`'s sign against real Wingfield frames.
 
-**`tennis eval-classifier <session> --labels …`:**
+### M7: clips and HTML report (§6.8, §6.9)
 
-- **Label files:** accept the Wingfield strokes format (`t,player,stroke,...`, keeping only `player == self`) and a plain `t,stroke` format.
-- **Label clock:** reuse `LabelSpec` and `make_scorer` (`--label-offset`, `--label-resolution`, `--segments`) to match labels to confirmed swings with `match_events`. Only matched pairs count toward accuracy.
-- **Output:** a confusion matrix plus per-class precision and recall, and optionally a markdown report written to `docs/validation/M5_classifier.md`.
-- **Test set:** the Wingfield export has about 144 own shots (43 serves, 55 forehands, 40 backhands, 6 volleys). Only near-side shots can be scored, and only those that are also confirmed swings.
+Stage 8 renders a clip for every outlier, the most typical swing of each stroke type and every labelled swing (capped at `clips.max_per_label`), decoding only those swings. `clips/index.json` is the declared output, not the directory, and it records why each clip was chosen.
 
-**Risks:**
+Stage 9 writes one self-contained `report.html` with every §6.9 section. Plotly is inlined once, the clips are linked relative, and cross-session numbers come from DuckDB over `data/sessions/*/metrics.parquet` (with a plain-Python fallback that a test holds to the same answers). `tennis report`, `tennis trends` and `tennis inspect` are all wired up.
 
-- the 30 fps, 230 px footage makes wrist positions noisy;
-- serves are easy, while volleys are rare and the rule is fragile;
-- the Wingfield "VOLLEY" label includes both forehand and backhand volleys; the spec merges them.
+On the PO question about which direction is an improvement: nothing is judged by default. A delta is coloured only for the metrics listed under `report.metric_direction`, and the report says so on the page.
 
-**Tests:** hand-built pose fixtures for each class, for **both handedness values**, following the style of `tests/integration/test_clean.py`, plus the eval matching and the confusion matrix.
+**Still open:** the acceptance criterion needs ≥ 3 sessions with pose. Only two sessions exist and the DJI one has no usable pose, so this is blocked on recordings (§6).
 
-### M6: metrics (§6.6), about 5 days
+### M8: voice labels (§6.7)
 
-**Stage 6 contract:**
+Stage 7 transcribes `audio.wav` with word timestamps, maps each word through `labels.vocabulary`, and attaches it to the latest confirmed own hit within `labels.max_delay_s` before it. Word times are WAV time, so `audio_start_s` puts them on the PTS timeline. Manual labels in `<paths.labels_dir>/manual_<session>.csv` override the spoken ones.
 
-- **Inputs:** `swings.parquet`, `swing_info.parquet`, `strokes.parquet`.
-- **Output:** `metrics.parquet`, one row per swing:
-  - `swing_id`, `stroke_type`;
-  - all the metrics, with NaN where a metric doesn't apply;
-  - `is_outlier`, `outlier_score`.
-- **Which swings:** only those with `qc_pass`, `is_self_confirmed` and near side.
+Transcription goes through a registry (`labels.backend`), with faster-whisper built in and its model cached under `<data_root>/models/whisper`. Tests register a backend returning a fixed word list, so CI never downloads anything.
 
-**Registry** (`tennis/stages/metrics.py`). Adding a metric must not require edits anywhere else:
+The optional-input support the plan called for is in: `Stage.optional_inputs` lists files a stage uses when they exist, and the clips and report stages list `labels.parquet` that way. Turning the labels on therefore rebuilds both without `--force`.
 
-```python
-@metric("elbow_angle_contact", applies_to={"serve", "forehand", "backhand", "volley"})
-def elbow_angle_contact(s: SwingFrame, racket: Side) -> float: ...
-```
-
-`SwingFrame` gives time-indexed access to the normalized keypoints: `at(t_rel)`, `between(a, b)`, and `contact` (the frame nearest `t_rel = 0`). `racket` is `"l"` or `"r"`.
-
-Implement every metric in the §6.6 table. Notes:
-
-- **Angles:** use `util/geometry.angle_deg`.
-- **`contact_forward`:** the sign depends on the camera and on handedness. Multiply by `player.forward_sign`, and document the convention with a drawing in ARCHITECTURE.md. From behind, "in front of the body" is up the court, which in 2-D shows up as smaller image y, so larger normalized y. Verify this against the Wingfield frames before trusting it.
-- **Wrist speed:** `peak_wrist_speed` and `peak_speed_offset` use the stored `<side>_wrist_speed`. Remember the smoothing trade-off (see `test_light_smoothing_keeps_peak_speed`).
-- **`shoulder_turn_proxy_min`:** the ratio of apparent shoulder width to its value at `t_rel = −1.0`. It is NaN if the window starts later than that.
-
-**Aggregation:** per stroke type, compute count, mean, std ("consistency"), median, p10 and p90. Store these either in a small `metrics_summary.parquet` or in the report stage; decide which, and document it.
-
-**Outliers:**
-
-- Mahalanobis distance on `metrics.outlier_metrics`, per stroke type.
-- Use a robust or regularized covariance (`np.cov` plus a small ridge; fall back to standardized Euclidean distance when there are fewer than about 10 swings).
-- Flag swings above the `outlier_percentile`.
-- Keep it deterministic: no random sampling.
-
-**Tests:**
-
-- one test per metric on a hand-built swing with known geometry (the spec requires this);
-- a determinism test: run twice and check the Parquet files are byte-identical apart from metadata;
-- use `util/io` equality helpers.
-
-### M7: clips and HTML report (§6.8, §6.9, `tennis report`, `tennis trends`, `tennis inspect`), about 6–8 days
-
-**Dependencies:** add `jinja2` and `duckdb` (plotly is already a dependency).
-
-**Stage 8, clips:**
-
-- **Selection:**
-  - every outlier;
-  - the swing closest to the median, per stroke type;
-  - every `good` or `late` swing (after M8), capped at `clips.max_per_label`.
-- **Rendering:** decode `[t − 1.2, t + 0.8]` with `FrameReader` and draw with `util/overlay.py`: the skeleton (racket side already colored), a red border on the contact frame, and stroke type plus key metrics as text. Write with `VideoWriter` (H.264, 720p). Optional slow motion: set `fps × clips.slow_motion_rate`.
-- **Output:** `clips/<swing_id>.mp4`, plus `clips/index.json` listing why each clip was chosen.
-- **Caching:** use `clips/index.json` as the stage output, not the directory. A directory's mtime changes whenever any file changes, which works badly with fingerprints.
-- **Performance:** clips need the source video, so add `@source` to the stage inputs. They are slow on long sessions, so decode only the selected swings.
-
-**Stage 9, report:** `templates/report.html.j2` (set up hatch to package `tennis/templates`). It must be a single self-contained file with Plotly inlined (`include_plotlyjs="inline"` once) and clips linked by relative path. It has these sections:
-
-1. **Session summary:**
-   - date, duration, contacts, own swings, QC pass rate, swings per stroke type;
-   - from `players.json`: who is you, the hand, and the side timeline.
-2. **Metrics table:**
-   - mean ± std per stroke type;
-   - deltas against the rolling mean of the last `report.rolling_sessions` sessions, green or red. Which direction is "good" is metric-specific; ask the PO, otherwise show the delta without judging it.
-3. **Trends:** DuckDB over `data/sessions/*/metrics.parquet` (read with `read_parquet(glob, filename=true)`), for each `report.trend_metrics`, as session mean with a ± std band.
-4. **Distributions:** a histogram per metric.
-5. **Label analysis** (after M8): Cohen's d between `good` and each negative label, per metric, sorted by |d|.
-6. **Clip gallery.**
-7. **Diagnostics:**
-   - ingest warnings (e.g. low fps);
-   - contact counts and first-pass/confirmed numbers;
-   - swap counts, track resets, far-player detection rate;
-   - identity margins.
-
-**CLI commands:**
-
-- `tennis report <id>`: reruns stages 8–9 for that session.
-- `tennis trends [--since]`: writes `data/report.html`.
-- `tennis inspect <id> <swing_id>`: prints that swing's metrics and opens its clip with `open` on macOS or `xdg-open` on Linux.
-
-**Acceptance:** the report must open offline with ≥ 3 sessions. Only two sessions exist, and one of them (DJI) has no pose, so the PO has to record more; see §6.
-
-### M8: voice labels (§6.7), about 4 days
-
-**Dependencies:** add `faster-whisper`. The model is downloaded on first use into `data/models/whisper`. Pass `download_root` so nothing lands in `~/.cache` unexpectedly.
-
-**Stage 7, labels:**
-
-- **Order:** it is optional (`labels.enabled`, `--no-labels`). Its inputs should be `audio.wav`, `contacts.parquet` and `swing_info.parquet`.
-- **Transcription:** run faster-whisper with word timestamps, using the configured model and language.
-- **Matching words:** map each word through `labels.vocabulary` (case-insensitive, strip punctuation), then attach it to the latest **confirmed** own contact within `[0, max_delay_s]` before the word. Log unmatched words and discard them.
-- **Manual labels:** also read `labels/manual_<session>.csv` (`contact_id,label`); manual labels override voice labels.
-- **Output:** `labels.parquet` with `swing_id`, `label`, `word`, `t_word`, `confidence`, and `source` (voice or manual).
-- **Order fix:** stage 7 currently runs *after* metrics (6) but *before* clips (8) and report (9), which consume it. That's fine, but make clips and report list `labels.parquet` as an *optional* input: the runner currently requires every input to exist, so add support for optional inputs to `Stage`.
-
-**Audio and matching notes:**
-
-- The clip-on mic records the player's own voice, which is what we want.
-- The `audio.wav` WAV time maps to PTS as `t + audio_start_s`.
-- Whisper timestamps are relative to the WAV.
-- Default language: the PO hasn't said. §14 lists this as an open question; the PO's name suggests French might matter. Make `labels.language` and the vocabulary per session or per config.
-
-**Acceptance:** ≥ 80% of spoken label words correctly matched. The PO needs to record a session saying the words (see §6), then label the truth by hand in a small CSV. Add `tennis eval-labels` alongside `eval-contacts`.
-
-**Tests:** synthetic transcripts through the matcher (mock the whisper call); no model in CI.
+**Still open:** `labels.language` still defaults to `en` — the PO has not said which language they call out in (§6, question 4). And the ≥ 80% match rate needs a session recorded with the words spoken, plus a `said_<session>.csv` of what was actually said (format in `labels/README.md`).
 
 ### Cross-cutting work, still owed from the spec
 
-- **§10.2 integration fixture:** a real, committed clip of about 20 s with 3–5 impacts. The pipeline must run end to end in CI on the CPU with a small pose model (`yolo11n-pose.pt`, 6 MB, downloaded in CI and cached). Today, tests generate synthetic clips with ffmpeg, and the YOLO backend is stubbed (`_no_real_pose_model` in `tests/conftest.py`). Add the fixture and mark the test `real_yolo`.
-- **§10.3 determinism check:** after M6, run a session twice with the cache disabled (`--force`) and require identical metrics. Watch for GPU nondeterminism: compare with tolerance on MPS/CUDA, and exactly on CPU.
-- **§9 performance:** a 60-min 4K session at 120 fps with about 600 swings must run in ≤ 45 min on an RTX 3060. It is untested. Ideas:
-  - `pose.hwaccel: cuda`;
-  - half precision (`half=True` in `YoloBackend.predict`);
-  - larger batches;
-  - skipping the far pass on frames where the near player is not near a contact;
-  - `track_far: false` when the mic identifies the player reliably.
+None of this was done; it is the top of the next backlog.
 
-  Measure on the PO's target GPU (§14: "TrueNAS host or desktop?").
+- **§10.2 integration fixture:** a real, committed clip of about 20 s with 3–5 impacts. The pipeline must run end to end in CI on the CPU with a small pose model (`yolo11n-pose.pt`, 6 MB, downloaded in CI and cached). Today, tests generate synthetic clips with ffmpeg, and the YOLO backend is stubbed (`_no_real_pose_model` in `tests/conftest.py`). Add the fixture and mark the test `real_yolo`. Stages 5–9 now have their own tests with hand-built data, so the fixture is only needed for the model-facing part.
+- **§10.3 determinism check on a real session:** stage 6 has a unit-level determinism test, but the whole-pipeline check is not done. Run a session twice with `--force` and require identical metrics. Watch for GPU nondeterminism: compare with tolerance on MPS/CUDA, exactly on CPU.
+- **§9 performance:** a 60-min 4K session at 120 fps with about 600 swings must run in ≤ 45 min on an RTX 3060. Untested. Ideas: `pose.hwaccel: cuda`; half precision (`half=True` in `YoloBackend.predict`); larger batches; skipping the far pass on frames where the near player is not near a contact; `track_far: false` when the mic identifies the player reliably. Stage 8 also decodes the video, but only around the selected swings. Measure on the PO's target GPU (§14: "TrueNAS host or desktop?").
 - **§9 memory ≤ 8 GB:**
   - `clean.run` loads `keypoints.parquet` whole. With `pose.contacts: all` on a 4K 120 fps session, that can be millions of rows; check it, and stream per window if needed.
   - `swings_table` concatenates all swings in memory.
-- **Deliverables (§12):** README (keep it current), `config.example.yaml` (every option commented; a test checks it matches the defaults), ARCHITECTURE.md, and validation notes for M2, M5 and M8.
-
----
+  - stage 6's `load_swings` holds every swing's keypoints at once, and `reporting` loads `metrics.parquet` whole — both much smaller than `keypoints.parquet`, but on the same growth curve.
+- **Deliverables (§12):** README, `config.example.yaml` (a test now checks it lists every option *and* matches the defaults), ARCHITECTURE.md and this file are current. The validation notes for M5 and M8 are the ones still missing, for the reasons above.
 
 ## 4. Known issues and traps
 
@@ -294,6 +196,9 @@ Implement every metric in the §6.6 table. Notes:
 | **Own-hit detection is F1 0.68 on Wingfield** | That match has a court mic and whole-second labels, so it isn't a fair test of the §10.3 target. Real validation needs a clip-on-mic session with frame-accurate labels (`labels/README.md`). |
 | **`--from-stage` on the Wingfield session** | Always pass the scratch config (`pose.contacts: all`). Without it, the default `self_audio` changes the pose windows and triggers a 45-minute rerun. |
 | **Session ID from the container date** | The Wingfield MP4 says 2025-01-16 but was recorded on 2025-01-10. Use `--session-id` for exported files. |
+| **`manual_<session>.csv` is not a stage input** | Stage 7 reads it, but it is not fingerprinted, so editing it alone does not make the stage stale. Rerun with `--from-stage 7`. |
+| **The report is about 5 MB** | Plotly is inlined so the page opens offline, as the spec requires. That is the whole cost; the figures themselves are small. |
+| **`ruff format` also formats Markdown code blocks** | It reformatted a Python block in this file. If a docs-only change fails `ruff format --check`, that is why. |
 
 ---
 
@@ -304,7 +209,7 @@ uv sync                                   # Python 3.11, all deps (includes torc
 uv run pytest -q                          # ~8 s
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 
-# Wingfield session (pose already done; stages 4+ rerun in seconds)
+# Wingfield session (pose already done; stages 4-9 rerun in seconds, clips excepted)
 cat > /tmp/wingfield.yaml <<'YAML'
 paths:
   data_root: /Users/jeremiehamel/dev/repos/TennisAnalyzer/data
@@ -317,6 +222,15 @@ uv run tennis players 2025-01-10_wingfield --config /tmp/wingfield.yaml
 uv run tennis eval-contacts 2025-01-10_wingfield --config /tmp/wingfield.yaml \
   --labels labels/contacts_2025-01-10_wingfield.csv \
   --label-offset 1 --label-resolution 1 --segments labels/rallies_2025-01-10_wingfield.csv
+
+# M5 acceptance, once the session is up to date (this is the next thing to run)
+uv run tennis eval-classifier 2025-01-10_wingfield --config /tmp/wingfield.yaml \
+  --labels labels/strokes_2025-01-10_wingfield.csv \
+  --label-offset 1 --label-resolution 1 --segments labels/rallies_2025-01-10_wingfield.csv \
+  --report docs/validation/M5_classifier.md
+
+uv run tennis report 2025-01-10_wingfield --config /tmp/wingfield.yaml   # clips + report.html
+uv run tennis trends --config /tmp/wingfield.yaml                        # data/report.html
 ```
 
 **Conventions:**
@@ -330,11 +244,14 @@ uv run tennis eval-contacts 2025-01-10_wingfield --config /tmp/wingfield.yaml \
 
 ## 6. Questions for the product owner
 
+**Every remaining acceptance criterion is blocked on one of questions 1–3.** The code for M5–M8 is written and tested; what it has never seen is footage good enough to be measured against.
+
 1. **Recording setup:** can the camera be raised behind the baseline (like the Wingfield camera), at 100–120 fps? This blocks useful pose on the DJI footage.
 2. **Labels for M2:** about 100 own hits, to the frame, from one DJI clip-on-mic session (format in `labels/README.md`).
 3. **More sessions:** M7 needs ≥ 3 sessions with pose, and M8 needs one session with spoken label words.
-4. **Voice labels:** which language(s) and vocabulary? (§14)
+4. **Voice labels:** which language(s) and vocabulary? `labels.language` defaults to `en` and the vocabulary to English words; both are per-config, so this is a one-line change once you say. (§14)
 5. **Target machine for the 45-minute performance budget:** TrueNAS host or desktop, and which GPU? (§14)
 6. **Serves:** are they filmed from another camera position? If so, config profiles per session type are needed. (§14)
-7. **Good or bad metric changes:** for each metric, which direction is an improvement? This sets the green/red deltas in the report (§6.9).
+7. **Good or bad metric changes:** for each metric, which direction is an improvement? This sets the green/red deltas in the report (§6.9). Until you say, the report shows every delta without a verdict; fill in `report.metric_direction` to colour the ones you care about. Worth pairing with a look at `contact_forward`: one camera behind the baseline cannot separate "in front of the body" from "high", so that metric may not mean what its name suggests (ARCHITECTURE.md has the drawing).
 8. **Changes from the spec:** confirm the changes in §2, especially two-player identity and far-side swings not being measured.
+9. **The §6.6 metric table:** no copy of the spec is in the repository, so stage 6's metric list was reconstructed (§1). Send the table, or confirm the fourteen metrics in ARCHITECTURE.md are the right set.

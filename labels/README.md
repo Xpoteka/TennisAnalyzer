@@ -30,8 +30,43 @@ t,note
 
 All times are Wingfield's own clock, in whole seconds. Measure the offset to the video before using them; for 2025-01-10 it is +1 s.
 
-## `strokes_<session-id>.csv`: stroke types (M5)
+## `strokes_<session-id>.csv`: stroke types
 
-The classifier will use the Wingfield format above: columns `t,player,stroke`.
+For `tennis eval-classifier`. Two shapes are accepted, and the header decides which:
+
+- the Wingfield export above, `t,player,stroke,...`, of which only the rows marked `self` are used;
+- a plain `t,stroke` file, where every row is yours.
+
+Stroke names must be `serve`, `forehand`, `backhand` or `volley`; rows with anything else are skipped. Times follow the same clock rules as the contact labels, so pass `--label-offset` and `--label-resolution` for a coarse external clock.
+
+```csv
+t,stroke
+1:23.4,forehand
+1:26.2,backhand
+```
+
+## `manual_<session-id>.csv`: hand-written shot labels
+
+Read by **stage 7**, not by a validation tool. Rows are `contact_id,label`, and they override whatever the transcriber heard for that contact:
+
+```csv
+contact_id,label
+412,framed
+418,good
+```
+
+The contact id must be a confirmed own hit of that session — look it up in `swing_info.parquet` or in the report. Because this file is not a declared stage input, adding or editing it needs `tennis process ... --from-stage 7`.
+
+The folder is `paths.labels_dir` in the config (`./labels` by default), resolved from the config file's directory.
+
+## `said_<session-id>.csv`: what you actually said
+
+For `tennis eval-labels`. One row per label word you spoke, with the time you said it (video time) and which label it was:
+
+```csv
+t,label
+3:12.4,good
+3:20.0,late
+```
 
 CSV files in this folder are git-ignored, because they are personal session data.

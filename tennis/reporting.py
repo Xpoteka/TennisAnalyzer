@@ -124,9 +124,15 @@ def trend_table(config: Config, since: str | None = None) -> list[dict[str, Any]
         return _trend_table_without_duckdb(config, since)
     if not list(root.glob("*/metrics.parquet")):
         return []
+    # Only finite values are aggregated. A metric that does not apply to a stroke type is
+    # NaN on every row, and DuckDB's stddev_samp raises "out of range" on a group of NaNs
+    # rather than returning one; avg would quietly return NaN. This also matches what
+    # stage 6 put in metrics_summary.parquet, and what the fallback below computes.
+    finite = 'CASE WHEN isfinite("{name}") THEN "{name}" END'
     metric_columns = ", ".join(
-        f'avg("{name}") AS "{name}_mean", stddev_samp("{name}") AS "{name}_std", '
-        f'count("{name}") AS "{name}_count"'
+        f'avg({finite.format(name=name)}) AS "{name}_mean", '
+        f'stddev_samp({finite.format(name=name)}) AS "{name}_std", '
+        f'count({finite.format(name=name)}) AS "{name}_count"'
         for name in REGISTRY
     )
     query = f"""
@@ -491,12 +497,17 @@ def _diagnostics(session: Session) -> dict[str, Any]:
 
     keypoints = session.path("keypoints.parquet")
     if keypoints.exists():
-        table = pq.read_table(keypoints, columns=["slot", "detected"]).to_pydict()
-        slots = table.get("slot") or ["near"] * len(table["detected"])
-        for slot in ("near", "far"):
-            flags = [d for s, d in zip(slots, table["detected"], strict=True) if s == slot]
-            if flags:
-                out[f"{slot}_detection_rate"] = sum(1 for f in flags if f) / len(flags)
+        # The report must not fail over a diagnostic. An older keypoints file may not have
+        # the slot column, and a hand-built one may have neither.
+        names = set(pq.read_schema(keypoints).names)
+        if "detected" in names:
+            wanted = ["detected"] + (["slot"] if "slot" in names else [])
+            table = pq.read_table(keypoints, columns=wanted).to_pydict()
+            slots = table.get("slot") or ["near"] * len(table["detected"])
+            for slot in ("near", "far"):
+                flags = [d for s, d in zip(slots, table["detected"], strict=True) if s == slot]
+                if flags:
+                    out[f"{slot}_detection_rate"] = sum(1 for f in flags if f) / len(flags)
 
     players_path = session.path("players.json")
     if players_path.exists():
