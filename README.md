@@ -1,6 +1,6 @@
 # Tennis Technique Analyzer
 
-A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
+A local pipeline, with a command line and a [browser UI](#browser-ui). It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
 **Status: milestone M8 — every stage of the pipeline is built.** Ingest, contact detection, pose extraction, cleaning and QC, stroke classification, metrics with outliers, voice labels, clips and the HTML report, plus the evaluation tools for each acceptance criterion. What is *not* done is the validation on real footage: the acceptance numbers for M5 and M8 need labelled sessions that do not exist yet, and the report needs at least three sessions with pose. See [docs/HANDOFF.md](docs/HANDOFF.md) §1 and §6 for what is still owed, and [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
 
@@ -17,6 +17,43 @@ cp config.example.yaml config.yaml      # optional; every key has a default
 
 Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` directly.
 
+## Browser UI
+
+```bash
+uv run tennis ui
+```
+
+This opens `http://127.0.0.1:8731/` in your browser. **Drop a session video on the page and it
+is analysed**: the file is uploaded into `<data_root>/uploads/`, the whole pipeline runs, and the
+output streams into the console at the bottom of the page exactly as it would in a terminal.
+
+The page has four views:
+
+- **Analyse** — the drop zone, the processing options, and a field for the path of a video
+  already on this machine. Use the path when the file is large: dropping it uploads a copy,
+  while a path is symlinked like any other session.
+- **Sessions** — every session with the status of each stage, a **Run the pipeline** button that
+  continues a session that stopped part-way (finished stages are still skipped), and, for the one
+  you pick:
+  the counts and stage timings, who was identified as you, a sortable table of every measured
+  swing (filter by stroke type, outliers, or swings that have a clip) where clicking a swing
+  plays its clip beside its metrics and the session median, the session report, the tracking
+  review files, and the tail of `pipeline.log`.
+- **All commands** — every CLI command as a form, including the tuning and evaluation tools.
+  Label CSVs can be uploaded straight into the labels folder from the form that needs them.
+- **Config** — `config.yaml` in a text box. A config that fails to validate is not saved.
+
+Notes:
+
+- The UI runs the CLI in a subprocess, so nothing can behave differently from the terminal.
+  Each job's exact command line is shown under its output.
+- Jobs run **one at a time**, in the order you start them: two stages writing into one session
+  at once would fight over the same files. Queued jobs are listed in the console drawer.
+- An action whose stage has not run yet is disabled and says which stage it needs, rather than
+  starting a command that would fail on a missing input.
+- The server binds to loopback and refuses cross-origin writes. It is a single-user local tool;
+  do not expose it to a network.
+
 ## Recording guidelines
 
 - Mount the camera on a tripod in the **same position every session**: behind the baseline, slightly off-centre, raised.
@@ -24,12 +61,13 @@ Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` dire
 - Record the clip-on microphone **into the camera file**. Ingest fails if the video has no audio track.
 - One person per half of the court works best: you and your hitting partner. Changing ends is fine; the pipeline tells the two of you apart by clothing color. Wear something that looks clearly different from your partner.
 - Keep the camera clock correct. Session IDs come from the video's creation timestamp.
-- Keep the video files stored locally. iCloud's "Optimize Mac Storage" can remove the local copy, and reading such a file then stalls while iCloud downloads it again.
+- Keep the video files stored locally. iCloud's "Optimize Mac Storage" can remove the local copy, and reading such a file then stalls while iCloud downloads it again. The pipeline refuses such a file rather than hanging on it; download it first with `brctl download <path>`, or move it out of iCloud Drive.
 - Leave the raw files where they are. The pipeline never copies or changes them; each session only holds a symlink to the file.
 
 ## CLI
 
 ```text
+tennis ui [--port 8731] [--no-open]           # the browser UI
 tennis process <video> [--session-id ID] [--config PATH] [--force] [--from-stage N] [--no-labels]
 tennis list                               # sessions and the status of each stage
 tennis report <session-id> [--no-clips]   # rerun stages 8-9 for one session

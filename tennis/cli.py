@@ -117,13 +117,14 @@ def report(
     ] = False,
 ) -> None:
     """Rebuild the clips and the report for one session (stages 8 and 9)."""
-    from tennis.stages import STAGES_BY_NAME, StageContext
+    from tennis.stages import STAGES_BY_NAME, StageContext, check_inputs
 
     cfg = load_config(config)
     session = open_session(cfg.paths.data_root, session_id)
     names = ["report"] if no_clips else ["clips", "report"]
     for name in names:
         stage = STAGES_BY_NAME[name]
+        check_inputs(session, stage)
         chash = stage.config_hash(cfg)
         session.clear_stamp(name)
         inputs = session.fingerprints(stage.all_inputs)
@@ -492,6 +493,41 @@ def eval_labels(
 
         write_label_eval(result, report_path)
         typer.echo(f"wrote {report_path}", err=True)
+
+
+@app.command()
+def ui(
+    config: ConfigOpt = None,
+    host: Annotated[
+        str, typer.Option(help="Interface to bind. Keep it on loopback.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port; 0 picks a free one.")] = 8731,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the page in a browser.")
+    ] = True,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Log every HTTP request.")] = False,
+) -> None:
+    """Serve the browser UI: drop a video to analyse it, and run any command from a form."""
+    from tennis.web import serve
+
+    cfg = load_config(config)
+    config_path = config if config is not None else _default_config_path()
+    serve(
+        cfg,
+        config_path,
+        Path.cwd(),
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        verbose=verbose,
+    )
+
+
+def _default_config_path() -> Path | None:
+    from tennis.config import DEFAULT_CONFIG_NAME
+
+    path = Path.cwd() / DEFAULT_CONFIG_NAME
+    return path if path.is_file() else None
 
 
 @app.command()

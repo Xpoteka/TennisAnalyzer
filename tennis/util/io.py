@@ -141,3 +141,22 @@ def read_parquet_provenance(path: Path) -> dict[str, str]:
         for k, v in meta.items()
         if k.decode().startswith(META_PREFIX)
     }
+
+
+# macOS sets this flag on a file whose contents have been evicted to iCloud. Reading it
+# blocks until the whole file downloads again, which for a session video is an unbounded
+# stall with no output at all, so callers check before they hand the path to ffmpeg.
+SF_DATALESS = 0x40000000
+
+
+def is_dataless(path: Path) -> bool:
+    """True when the file exists but its bytes are not on this disk (a cloud placeholder)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if st.st_size == 0:
+        return False
+    if getattr(st, "st_flags", 0) & SF_DATALESS:
+        return True
+    return getattr(st, "st_blocks", None) == 0

@@ -205,7 +205,7 @@ def run_pipeline(
                 ctx.log("up to date, skipping")
                 continue
 
-            _check_inputs(session, stage)
+            check_inputs(session, stage)
             input_prints = session.fingerprints(stage.all_inputs)
             session.clear_stamp(stage.name)
             ctx.log("running", reason=reason)
@@ -236,7 +236,8 @@ def run_pipeline(
     return ran
 
 
-def _check_inputs(session: Session, stage: Stage) -> None:
+def check_inputs(session: Session, stage: Stage) -> None:
+    """Fail with the name of the stage that produces a missing input, not with a traceback."""
     for name in stage.inputs:
         if session.path(name).exists():
             continue
