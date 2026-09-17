@@ -135,3 +135,17 @@ def test_stage_failure_exits_2(
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 2
     assert "stage 'ingest' failed" in err
+
+
+def test_report_on_a_session_that_has_not_been_measured_says_which_stage_is_missing(
+    config_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A session that stopped early must not crash the report with a raw traceback."""
+    session = config_file.parent / "data" / "sessions" / "2026-09-20_evening"
+    session.mkdir(parents=True)
+    (session / "source.mp4").symlink_to(config_file)  # a link is all `report` needs to open it
+
+    code, _, err = _run(["report", "2026-09-20_evening", "--config", str(config_file)], capsys)
+    assert code == 2
+    assert "missing input metrics.parquet" in err
+    assert "run stage 6 (metrics) first" in err

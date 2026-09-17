@@ -11,7 +11,7 @@ from typing import Any
 
 from tennis import __version__
 from tennis.errors import UserError
-from tennis.util.io import read_json, write_json
+from tennis.util.io import is_dataless, read_json, write_json
 
 SESSIONS_DIR = "sessions"
 SOURCE_STEM = "source"
@@ -223,6 +223,13 @@ def check_video_file(video: Path) -> Path:
         )
     if not os.access(video, os.R_OK):
         raise UserError(f"video is not readable: {video}")
+    if is_dataless(video):
+        raise UserError(
+            f"the contents of {video} are not on this disk: the file is a cloud placeholder "
+            "(iCloud's 'Optimize Mac Storage' evicts local copies). Reading it would stall "
+            "with no output until all of it downloads again. Download it first, then retry:\n"
+            f"  brctl download '{video}'"
+        )
     return video.resolve()
 
 

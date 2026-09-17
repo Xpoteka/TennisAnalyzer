@@ -184,3 +184,50 @@ def test_source_input_follows_symlink(session: Session, tmp_path: Path) -> None:
     assert session.stale_reason("s", ("@source",), ("out.txt",), "h") is None
     os.utime(raw, (3_000, 3_000))
     assert session.stale_reason("s", ("@source",), ("out.txt",), "h") is not None
+
+
+def test_is_dataless_ignores_an_ordinary_file(tmp_path: Path) -> None:
+    from tennis.util.io import is_dataless
+
+    real = tmp_path / "clip.mp4"
+    real.write_bytes(b"x" * 4096)
+    assert is_dataless(real) is False
+    assert is_dataless(tmp_path / "gone.mp4") is False
+
+    empty = tmp_path / "empty.mp4"
+    empty.touch()
+    assert is_dataless(empty) is False
+
+
+def test_a_cloud_placeholder_fails_fast_instead_of_stalling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading an evicted iCloud file blocks for as long as the download takes, with no
+    output at all, so it is rejected before ffmpeg ever sees the path."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x" * 4096)
+
+    real_stat = Path.stat
+
+    class _Dataless:
+        def __init__(self, st: os.stat_result) -> None:
+            self._st = st
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._st, name)
+
+        @property
+        def st_flags(self) -> int:
+            return 0x40000000  # SF_DATALESS
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> object:
+        st = real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+        return _Dataless(st) if self == video else st
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    from tennis.util.io import is_dataless
+
+    assert is_dataless(video) is True
+    with pytest.raises(UserError, match="not on this disk"):
+        check_video_file(video)
