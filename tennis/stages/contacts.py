@@ -218,6 +218,9 @@ class LabelScorer:
     truth_pts: npt.NDArray[np.float64]
     segments: list[tuple[float, float]]  # video time, label offset applied
     pts_segments: list[tuple[float, float]]
+    # Index into ``spec.times_s`` of each kept label, so callers can line up whatever else
+    # their label file holds (a stroke type, a spoken word) with ``truth_pts``.
+    truth_index: tuple[int, ...] = ()
 
     def in_range(self, t_pts: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
         return _in_segments(t_pts, self.pts_segments)
@@ -261,7 +264,8 @@ def make_scorer(
     if any(b <= a for a, b in ranges):
         raise UserError("every evaluation segment must end after it starts")
     centers = windows + labels.resolution_s / 2
-    truth = labels.times_s[_in_segments(centers, ranges)] + video_start
+    kept = np.flatnonzero(_in_segments(centers, ranges))
+    truth = labels.times_s[kept] + video_start
     if truth.size == 0:
         raise UserError("no labels fall inside the evaluation segments")
     return LabelScorer(
@@ -269,6 +273,7 @@ def make_scorer(
         truth_pts=truth,
         segments=ranges,
         pts_segments=[(a + video_start, b + video_start) for a, b in ranges],
+        truth_index=tuple(int(i) for i in kept),
     )
 
 

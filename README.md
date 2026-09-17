@@ -2,7 +2,7 @@
 
 A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
-**Status: milestone M4.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, **pose extraction** with a review video, and **cleaning, normalization, QC and own-hit confirmation**. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together. Continuing development? Start with [docs/HANDOFF.md](docs/HANDOFF.md).
+**Status: milestone M8 — every stage of the pipeline is built.** Ingest, contact detection, pose extraction, cleaning and QC, stroke classification, metrics with outliers, voice labels, clips and the HTML report, plus the evaluation tools for each acceptance criterion. What is *not* done is the validation on real footage: the acceptance numbers for M5 and M8 need labelled sessions that do not exist yet, and the report needs at least three sessions with pose. See [docs/HANDOFF.md](docs/HANDOFF.md) §1 and §6 for what is still owed, and [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
 
 ## Setup
 
@@ -32,15 +32,16 @@ Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` dire
 ```text
 tennis process <video> [--session-id ID] [--config PATH] [--force] [--from-stage N] [--no-labels]
 tennis list                               # sessions and the status of each stage
-tennis report <session-id>                # M7
-tennis trends [--since DATE]              # M7
+tennis report <session-id> [--no-clips]   # rerun stages 8-9 for one session
+tennis trends [--since YYYY-MM-DD] [--out PATH]    # cross-session report
+tennis inspect <session-id> <swing-id> [--no-open] # a swing's metrics, and its clip
 tennis tune-contacts <session-id> --labels PATH [--k ...] [--cutoff ...] [--db ...] [--report PATH]
 tennis eval-contacts <session-id> --labels PATH [--speeds ...] [--windows ...] [--report PATH]
+tennis eval-classifier <session-id> --labels PATH [--label-offset N] [--segments PATH]
+tennis eval-labels <session-id> --labels PATH [--tolerance-s 2]
 tennis pose-preview <session-id> [--count 20] [--speed 0.5]
 tennis swing-plots <session-id> [--count 6] [--all]
 tennis players <session-id>                 # who is you, which side, racket hand
-tennis eval-classifier <session-id> --labels PATH  # M5
-tennis inspect <session-id> <swing-id>    # M6
 ```
 
 - **Session IDs** default to `YYYY-MM-DD_<morning|afternoon|evening|night>`, in local time. If a different video already has that ID, the new session gets `_2`, `_3` and so on. Processing the same file again reuses its existing session.
@@ -130,6 +131,46 @@ In the output, `recall_any` is the recall you'd get if every detected sound coun
 
 > **YAML gotcha:** quote `"yes"`, `"no"`, `"on"` and `"off"` in the label vocabulary. Unquoted, YAML reads them as booleans and config validation fails.
 
+### Stroke types
+
+Stage 5 labels every confirmed, QC-passing near-side swing `serve`, `forehand`, `backhand` or `volley`, and marks two-handed strokes. The rules are in [ARCHITECTURE.md](ARCHITECTURE.md); the forehand/backhand rule depends on your racket hand, so check `tennis players` first if the result looks mirrored. Score it against labelled shots:
+
+```bash
+uv run tennis eval-classifier <session-id> --labels labels/strokes_<session-id>.csv \
+  --label-offset 1 --label-resolution 1 --segments labels/rallies_<session-id>.csv \
+  --report docs/validation/M5_classifier.md
+```
+
+It prints a confusion matrix with per-class precision and recall. Only labels that match a classified swing are scored: a label with no swing behind it is a miss of the *detector*, not of the classifier, and is counted separately.
+
+### Voice labels
+
+Say a word from `labels.vocabulary` right after a shot and stage 7 attaches it to that shot. It transcribes the session audio with faster-whisper (the model lands in `<data_root>/models/whisper` on first use) and matches each word to the latest confirmed own hit within `labels.max_delay_s` before it.
+
+- Set `labels.language` and `labels.vocabulary` to the words you actually say.
+- Correct a mis-heard call in `labels/manual_<session-id>.csv` (`contact_id,label`); manual labels win. Rerun with `--from-stage 7`.
+- Skip the stage entirely with `--no-labels` or `labels.enabled: false`.
+- Check it with `tennis eval-labels <session-id> --labels labels/said_<session-id>.csv`, where that file lists what you said and when.
+
+### Clips and the report
+
+```bash
+uv run tennis report <session-id>          # rerun stages 8-9; --no-clips for the HTML alone
+uv run tennis trends --since 2026-01-01    # every session, in data/report.html
+uv run tennis inspect <session-id> 42      # one swing's metrics, and open its clip
+```
+
+`data/sessions/<id>/report.html` is one self-contained file: it opens offline, with Plotly inlined and the clips linked beside it, so keep the `clips/` folder next to it if you move it. It covers the session summary, the metrics per stroke type with deltas against your recent sessions, trends, distributions, the label analysis, a clip gallery and diagnostics.
+
+Clips are rendered for every outlier, the most typical swing of each stroke type, and every labelled swing (capped by `clips.max_per_label`). Only those swings are decoded, so this is fast even on a long session.
+
+**Deltas are not judged by default.** Which direction counts as an improvement is metric-specific and personal, so a delta is only coloured for the metrics you list:
+
+```yaml
+report:
+  metric_direction: {contact_forward: up, knee_flex_min: down}
+```
+
 ## Development
 
 ```bash
@@ -159,4 +200,24 @@ No other stage needs to change.
 
 ### Adding a metric
 
-This arrives with M6. Metrics will be registered functions (`@metric(name, applies_to)`) in `tennis/stages/metrics.py`.
+Metrics are registered functions in `tennis/stages/metrics.py`. Adding one is a single edit there — no other file changes, and the column appears in `metrics.parquet`, the summary, the report and `tennis inspect` on its own:
+
+```python
+@metric("elbow_angle_contact", applies_to={"serve", "forehand", "backhand", "volley"}, unit="deg")
+def elbow_angle_contact(s: SwingFrame, racket: Side) -> float:
+    """Racket-arm elbow angle at contact; 180 is straight."""
+    pose = s.contact
+    if pose is None:
+        return float("nan")
+    return float(
+        angle_deg(
+            pose.point(racket, "shoulder"), pose.point(racket, "elbow"), pose.point(racket, "wrist")
+        )
+    )
+```
+
+`SwingFrame` gives time-indexed access to the swing's normalized keypoints: `at(t_rel)` for the frame nearest a time, `between(a, b)` for a span, `contact` for the frame nearest `t_rel = 0`, and `speed(side)` for the stored wrist speed. `racket` is `"l"` or `"r"`. Return NaN rather than raising when the geometry is missing, and add a test on a hand-built pose with a known answer — one test per metric is a spec requirement, and a test checks that every registered metric has one.
+
+### Adding a stroke classifier or a transcription backend
+
+Both follow the pose-backend pattern. Implement the protocol, register a factory (`register_classifier` in `tennis/stages/classify.py`, `register_transcriber` in `tennis/stages/labels.py`), and select it with `classify.classifier` or `labels.backend`.

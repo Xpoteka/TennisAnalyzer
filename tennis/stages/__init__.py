@@ -16,7 +16,17 @@ from dataclasses import dataclass
 from tennis.config import Config
 from tennis.errors import StageError, TennisError, UserError
 from tennis.session import SOURCE_INPUT, Session
-from tennis.stages import clean, contacts, ingest, pose
+from tennis.stages import (
+    classify,
+    clean,
+    clips,
+    contacts,
+    ingest,
+    labels,
+    metrics,
+    pose,
+    report,
+)
 from tennis.util.log import log, session_log
 
 
@@ -45,10 +55,18 @@ class Stage:
     milestone: str
     run: StageFn | None = None
     optional: bool = False
+    # Files the stage uses when they exist. They are not required to run it, but the stage
+    # is stale when one appears, changes or disappears - so turning the voice labels on
+    # rebuilds the clips and the report without a --force.
+    optional_inputs: tuple[str, ...] = ()
 
     @property
     def implemented(self) -> bool:
         return self.run is not None
+
+    @property
+    def all_inputs(self) -> tuple[str, ...]:
+        return self.inputs + self.optional_inputs
 
     def config_hash(self, config: Config) -> str:
         return config.section_hash(*self.config_keys)
@@ -69,19 +87,54 @@ STAGES: tuple[Stage, ...] = (
         "M4",
         clean.run,
     ),
-    Stage(5, "classify", ("swings.parquet",), ("swings.parquet",), ("player", "classify"), "M5"),
-    Stage(6, "metrics", ("swings.parquet",), ("metrics.parquet",), ("player", "metrics"), "M6"),
+    Stage(
+        5,
+        "classify",
+        classify.INPUTS,
+        classify.OUTPUTS,
+        classify.CONFIG_KEYS,
+        "M5",
+        classify.run,
+    ),
+    Stage(
+        6,
+        "metrics",
+        metrics.INPUTS,
+        metrics.OUTPUTS,
+        metrics.CONFIG_KEYS,
+        "M6",
+        metrics.run,
+    ),
     Stage(
         7,
         "labels",
-        ("audio.wav", "contacts.parquet"),
-        ("labels.parquet",),
-        ("labels",),
+        labels.INPUTS,
+        labels.OUTPUTS,
+        labels.CONFIG_KEYS,
         "M8",
+        labels.run,
         optional=True,
     ),
-    Stage(8, "clips", ("metrics.parquet",), ("clips",), ("clips", "player"), "M7"),
-    Stage(9, "report", ("metrics.parquet",), ("report.html",), ("report",), "M7"),
+    Stage(
+        8,
+        "clips",
+        clips.INPUTS,
+        clips.OUTPUTS,
+        clips.CONFIG_KEYS,
+        "M7",
+        clips.run,
+        optional_inputs=clips.OPTIONAL_INPUTS,
+    ),
+    Stage(
+        9,
+        "report",
+        report.INPUTS,
+        report.OUTPUTS,
+        report.CONFIG_KEYS,
+        "M7",
+        report.run,
+        optional_inputs=report.OPTIONAL_INPUTS,
+    ),
 )
 
 STAGES_BY_NAME = {s.name: s for s in STAGES}
@@ -94,7 +147,11 @@ def stage_status(session: Session, stage: Stage, config: Config) -> str:
     if stamp is None:
         return "-"
     reason = session.stale_reason(
-        stage.name, stage.inputs, stage.outputs, stage.config_hash(config)
+        stage.name,
+        stage.inputs,
+        stage.outputs,
+        stage.config_hash(config),
+        optional_inputs=stage.optional_inputs,
     )
     return "ok" if reason is None else "stale"
 
@@ -136,14 +193,20 @@ def run_pipeline(
             reason = (
                 "forced"
                 if forced
-                else session.stale_reason(stage.name, stage.inputs, stage.outputs, chash)
+                else session.stale_reason(
+                    stage.name,
+                    stage.inputs,
+                    stage.outputs,
+                    chash,
+                    optional_inputs=stage.optional_inputs,
+                )
             )
             if reason is None:
                 ctx.log("up to date, skipping")
                 continue
 
             _check_inputs(session, stage)
-            input_prints = session.fingerprints(stage.inputs)
+            input_prints = session.fingerprints(stage.all_inputs)
             session.clear_stamp(stage.name)
             ctx.log("running", reason=reason)
             started = time.perf_counter()

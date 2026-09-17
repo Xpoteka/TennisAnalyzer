@@ -1,0 +1,73 @@
+{#- Shared shell for the session report and the trends report. One self-contained file:
+    Plotly is inlined once here and every figure is rendered without its own copy. -#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Tennis Technique Analyzer{% endblock %}</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1b1b; --muted: #6a6a6a; --line: #e3e3e3;
+    --panel: #fafafa; --good: #1a7f37; --bad: #b42318; --accent: #0b5fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e8e8e8; --muted: #9aa0a6; --line: #2c3036;
+      --panel: #1b1e23; --good: #3fb950; --bad: #f85149; --accent: #6ea8ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; }
+  header { padding: 32px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 36px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; }
+  nav { margin: 12px 0 0; font-size: 13px; }
+  nav a { color: var(--accent); text-decoration: none; margin-right: 14px; }
+  nav a:hover { text-decoration: underline; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 4px; }
+  th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { position: sticky; top: 0; background: var(--bg); font-weight: 600; }
+  tbody tr:hover { background: var(--panel); }
+  .good { color: var(--good); }
+  .bad { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card .value { font-size: 22px; font-weight: 600; }
+  .card .name { color: var(--muted); font-size: 12px; text-transform: uppercase;
+                letter-spacing: 0.04em; }
+  .gallery { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .gallery figure { margin: 0; background: var(--panel); border: 1px solid var(--line);
+                    border-radius: 8px; padding: 10px; }
+  .gallery video { width: 100%; border-radius: 4px; background: #000; }
+  .gallery figcaption { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+         border: 1px solid var(--line); margin-right: 4px; }
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .note { background: var(--panel); border-left: 3px solid var(--accent); padding: 8px 12px;
+          font-size: 13px; margin: 12px 0; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  footer { margin-top: 48px; padding-top: 12px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: 12px; }
+</style>
+{{ plotly_script | safe }}
+</head>
+<body>
+<main>
+{% block body %}{% endblock %}
+<footer>
+  Generated {{ generated_at }} by the Tennis Technique Analyzer. This page is self-contained:
+  it opens offline. Clips are linked relative to it, so keep the <code>clips/</code> folder
+  beside it.
+</footer>
+</main>
+</body>
+</html>

@@ -127,7 +127,12 @@ class Session:
         self.stamp_path(stage).unlink(missing_ok=True)
 
     def stale_reason(
-        self, stage: str, inputs: tuple[str, ...], outputs: tuple[str, ...], config_hash: str
+        self,
+        stage: str,
+        inputs: tuple[str, ...],
+        outputs: tuple[str, ...],
+        config_hash: str,
+        optional_inputs: tuple[str, ...] = (),
     ) -> str | None:
         """Why ``stage`` must run, or None when its outputs are up to date.
 
@@ -138,6 +143,10 @@ class Session:
         before fingerprints existed fall back to "no input newer than the oldest output".
         A config hash is used instead of the config file's mtime so that editing unrelated
         options does not trigger reruns.
+
+        ``optional_inputs`` are files the stage uses when they exist. They may be missing,
+        but appearing, changing or disappearing still makes the stage stale, so producing
+        the optional voice labels rebuilds what reads them.
         """
         stamp = self.read_stamp(stage)
         if stamp is None:
@@ -152,12 +161,18 @@ class Session:
         recorded_in = stamp.get("inputs")
         recorded_out = stamp.get("outputs")
         if isinstance(recorded_in, dict) and isinstance(recorded_out, dict):
-            current_in = self.fingerprints(inputs)
+            current_in = self.fingerprints(inputs + optional_inputs)
             for name in inputs:
                 if current_in[name] is None:
                     return f"input missing: {name}"
                 if recorded_in.get(name) != current_in[name]:
                     return f"input changed: {name}"
+            for name in optional_inputs:
+                if recorded_in.get(name) != current_in[name]:
+                    kind = "appeared" if recorded_in.get(name) is None else "changed"
+                    if current_in[name] is None:
+                        kind = "disappeared"
+                    return f"optional input {kind}: {name}"
             current_out = self.fingerprints(outputs)
             for name in outputs:
                 if recorded_out.get(name) != current_out[name]:

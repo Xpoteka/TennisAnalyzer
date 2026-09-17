@@ -6,6 +6,7 @@ Exit codes: 0 success, 1 user or config error, 2 stage failure (stage name print
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -37,10 +38,6 @@ ConfigOpt = Annotated[
     Path | None,
     typer.Option("--config", "-c", help="Config YAML (default: ./config.yaml if present)."),
 ]
-
-
-def _not_implemented(command: str, milestone: str) -> NoReturn:
-    raise UserError(f"'tennis {command}' is not implemented yet (planned for {milestone})")
 
 
 def _version_callback(value: bool) -> None:
@@ -112,20 +109,51 @@ def _print_status_table(sessions: list[Session], cfg: Config) -> None:
 
 
 @app.command()
-def report(session_id: str, config: ConfigOpt = None) -> None:
-    """Rebuild the report for one session."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("report", "M7")
+def report(
+    session_id: str,
+    config: ConfigOpt = None,
+    no_clips: Annotated[
+        bool, typer.Option("--no-clips", help="Rebuild only the HTML, keeping the clips.")
+    ] = False,
+) -> None:
+    """Rebuild the clips and the report for one session (stages 8 and 9)."""
+    from tennis.stages import STAGES_BY_NAME, StageContext
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    names = ["report"] if no_clips else ["clips", "report"]
+    for name in names:
+        stage = STAGES_BY_NAME[name]
+        chash = stage.config_hash(cfg)
+        session.clear_stamp(name)
+        inputs = session.fingerprints(stage.all_inputs)
+        assert stage.run is not None
+        stage.run(StageContext(session, cfg, chash, get_logger(), name))
+        session.write_stamp(name, chash, inputs=inputs,
+                            outputs=session.fingerprints(stage.outputs))  # fmt: skip
+    typer.echo(f"wrote {session.path('report.html')}")
 
 
 @app.command()
 def trends(
-    since: Annotated[str | None, typer.Option(help="Only sessions from this date on.")] = None,
+    since: Annotated[
+        str | None, typer.Option(help="Only sessions from this date on (YYYY-MM-DD).")
+    ] = None,
     config: ConfigOpt = None,
+    out: Annotated[
+        Path | None, typer.Option(help="Output HTML (default: <data_root>/report.html).")
+    ] = None,
 ) -> None:
     """Build the cross-session trends report."""
-    load_config(config)
-    _not_implemented("trends", "M7")
+    from tennis.reporting import write_trends_report
+
+    cfg = load_config(config)
+    if since is not None:
+        try:
+            date.fromisoformat(since)
+        except ValueError as exc:
+            raise UserError(f"--since: expected YYYY-MM-DD, got {since!r}") from exc
+    typer.echo(f"wrote {write_trends_report(cfg, since=since, out=out)}")
 
 
 @app.command("pose-preview")
@@ -387,19 +415,108 @@ def eval_contacts(
 @app.command("eval-classifier")
 def eval_classifier(
     session_id: str,
-    labels: Annotated[Path, typer.Option(help="CSV of labeled stroke types.")],
+    labels: Annotated[
+        Path, typer.Option(help="CSV of labeled stroke types ('t,stroke' or 't,player,stroke').")
+    ],
     config: ConfigOpt = None,
+    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
+    label_offset: Annotated[
+        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
+    ] = 0.0,
+    label_resolution: Annotated[
+        float, typer.Option(help="Label precision in seconds: a label t means [t, t + this].")
+    ] = 0.0,
+    segments: Annotated[
+        Path | None,
+        typer.Option(help="CSV of start,end ranges to evaluate, on the labels' clock."),
+    ] = None,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
 ) -> None:
-    """Print a confusion matrix for the stroke classifier."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("eval-classifier", "M5")
+    """Print a confusion matrix for the stroke classifier (M5 acceptance: 90% accuracy)."""
+    import numpy as np
+
+    from tennis.evaluation import evaluate_classifier, format_classifier_eval
+    from tennis.stages.contacts import LabelSpec, make_scorer
+    from tennis.validation import read_segments, read_stroke_labels
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    pairs = read_stroke_labels(labels)
+    spec = LabelSpec(
+        times_s=np.array([t for t, _ in pairs], dtype=np.float64),
+        tolerance_s=tolerance_ms / 1000,
+        resolution_s=label_resolution,
+        offset_s=label_offset,
+    )
+    scorer = make_scorer(session, spec, read_segments(segments) if segments else None)
+    result = evaluate_classifier(session, scorer, pairs)
+    typer.echo(format_classifier_eval(result))
+    if report_path is not None:
+        from tennis.evaluation import write_classifier_eval
+
+        write_classifier_eval(result, report_path)
+        typer.echo(f"wrote {report_path}", err=True)
+
+
+@app.command("eval-labels")
+def eval_labels(
+    session_id: str,
+    labels: Annotated[
+        Path, typer.Option(help="CSV of the label words you actually said ('t,label').")
+    ],
+    config: ConfigOpt = None,
+    tolerance_s: Annotated[
+        float, typer.Option(help="How far a stored label may sit from the spoken word.")
+    ] = 2.0,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
+) -> None:
+    """Score the voice labels against what was said (M8 acceptance: 80% matched)."""
+    from tennis.evaluation import evaluate_labels, format_label_eval
+    from tennis.util.io import read_json
+    from tennis.validation import read_word_labels
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    meta_path = session.path("metadata.json")
+    video_start = float(read_json(meta_path).get("video_start_s", 0.0)) if meta_path.exists() else 0
+    result = evaluate_labels(
+        session, read_word_labels(labels), tolerance_s=tolerance_s, video_start_s=video_start
+    )
+    typer.echo(format_label_eval(result))
+    if report_path is not None:
+        from tennis.evaluation import write_label_eval
+
+        write_label_eval(result, report_path)
+        typer.echo(f"wrote {report_path}", err=True)
 
 
 @app.command()
-def inspect(session_id: str, swing_id: int, config: ConfigOpt = None) -> None:
+def inspect(
+    session_id: str,
+    swing_id: int,
+    config: ConfigOpt = None,
+    open_clip: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the swing's clip in a player.")
+    ] = True,
+) -> None:
     """Print a swing's metrics and open its clip."""
-    open_session(load_config(config).paths.data_root, session_id)
-    _not_implemented("inspect", "M6")
+    from tennis.review import format_swing_inspection, open_file
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    text, clip = format_swing_inspection(session, cfg, swing_id)
+    typer.echo(text)
+    if clip is None:
+        typer.echo("no clip for this swing; run 'tennis report' to render one", err=True)
+    elif open_clip:
+        open_file(clip)
+        typer.echo(f"opened {clip}", err=True)
+    else:
+        typer.echo(f"clip: {clip}", err=True)
 
 
 def main(argv: list[str] | None = None) -> NoReturn:

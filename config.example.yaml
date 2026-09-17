@@ -16,6 +16,8 @@ player:
 paths:
   data_root: ./data          # Sessions live in <data_root>/sessions/<id>/.
                              # A relative path is resolved against this file's directory.
+  labels_dir: ./labels       # Hand-made labels: manual_<session>.csv for stage 7, and the
+                             # label files the eval tools read.
 
 audio:                       # Stage 2: contact detection
   highpass_hz: 800           # High-pass Butterworth cutoff before onset detection (Hz).
@@ -80,6 +82,7 @@ cleaning:                    # Stage 4: cleaning and normalization
     max_track_resets: 2          # Swings with more player-track resets fail QC.
 
 classify:                    # Stage 5: stroke classification (normalized units)
+  classifier: rule               # Registered classifier (rule is built in).
   serve_wrist_above_nose: 0.3    # Racket wrist this far above the nose at contact = serve.
   volley_travel_max: 0.8         # Max pre-contact racket wrist travel for a volley.
   volley_bbox_bottom_max_y: 0.55 # Player box bottom above this image-height fraction = at net.
@@ -88,6 +91,9 @@ classify:                    # Stage 5: stroke classification (normalized units)
 metrics:                     # Stage 6
   outlier_metrics: [contact_height, contact_forward, elbow_angle_contact, knee_flex_min, peak_speed_offset]
   outlier_percentile: 95     # Swings above this Mahalanobis-distance percentile are outliers.
+  unit_turn_ratio: 0.85      # Shoulders this narrow (vs 1 s before contact) count as turned.
+  outlier_ridge: 1.0e-6      # Ridge added to the covariance before inverting it.
+  min_swings_for_covariance: 10  # Fewer swings of a stroke type: standardized Euclidean instead.
 
 clips:                       # Stage 8
   pre_s: 1.2                 # Seconds before contact.
@@ -100,11 +106,18 @@ clips:                       # Stage 8
 report:                      # Stage 9
   trend_metrics: [contact_height, contact_forward, knee_flex_min, unit_turn_lead_time]
   rolling_sessions: 5        # Deltas compare against the mean of this many past sessions.
+  metric_direction: {}       # Which way is an improvement, per metric: up | down. Metrics
+                             # left out are shown without a colour, because only you can say
+                             # what "better" means. For example:
+                             #   metric_direction: {contact_forward: up, knee_flex_min: down}
 
 labels:                      # Stage 7: voice labels (optional)
   enabled: true              # Also skippable per run with --no-labels.
-  whisper_model: small       # faster-whisper model size.
-  language: en
+  backend: faster_whisper    # Registered transcription backend.
+  whisper_model: small       # faster-whisper model size. Downloaded to <data_root>/models/whisper.
+  device: auto               # auto | cuda | cpu.
+  compute_type: default      # ctranslate2 compute type, e.g. int8, float16.
+  language: en               # Spoken language of your labels ("" to auto-detect).
   max_delay_s: 3.0           # A label word applies to the last own contact up to this long before.
   vocabulary:                # label: [spoken words]. A word may map to only one label.
     good: [good, nice, "yes"]    # quoted: bare yes is a boolean in YAML 1.1

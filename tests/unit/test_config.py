@@ -17,6 +17,27 @@ def test_example_config_matches_defaults() -> None:
     assert cfg.paths.data_root == REPO / "data"
 
 
+def test_example_config_lists_every_option() -> None:
+    """Spec section 12 asks for every option to be in the example file, commented."""
+    import yaml
+
+    raw = yaml.safe_load((REPO / "config.example.yaml").read_text())
+    defaults = Config().model_dump(mode="json")
+
+    def missing(actual: object, expected: object, prefix: str = "") -> list[str]:
+        if not isinstance(expected, dict) or not isinstance(actual, dict):
+            return []
+        out = []
+        for key, value in expected.items():
+            if key not in actual:
+                out.append(f"{prefix}{key}")
+                continue
+            out += missing(actual[key], value, f"{prefix}{key}.")
+        return out
+
+    assert missing(raw, defaults) == []
+
+
 def test_missing_file_is_config_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "nope.yaml")
