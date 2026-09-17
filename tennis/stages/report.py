@@ -26,7 +26,7 @@ INPUTS = (
 )
 OPTIONAL_INPUTS = ("labels.parquet", "clips/index.json", "players.json", "keypoints.parquet")
 OUTPUTS = ("report.html",)
-CONFIG_KEYS = ("report", "player")
+CONFIG_KEYS = ("report", "player", "labels.enabled")
 
 
 def run(ctx: StageContext) -> None:

@@ -61,3 +61,21 @@ def test_rewriting_a_table_full_of_nan_keeps_mtime(tmp_path: Path) -> None:
     swapped = pa.table({"m": [float("nan"), 1.0], "n": [float("nan"), 2.0]})
     write_parquet(swapped, path, stage="metrics", config_hash="a", schema_version=1)
     assert path.stat().st_mtime_ns > 1_000_000_000
+
+
+def test_a_null_is_not_the_same_as_a_nan_in_the_same_column(tmp_path: Path) -> None:
+    """to_numpy renders both as NaN, so the null positions must be compared separately."""
+    import os
+
+    from tennis.util.io import same_data
+
+    a = pa.table({"m": pa.array([None, float("nan")], pa.float64())})
+    b = pa.table({"m": pa.array([float("nan"), None], pa.float64())})
+    assert not same_data(a, b)
+    assert same_data(a, a) and same_data(b, b)
+
+    path = tmp_path / "n.parquet"
+    write_parquet(a, path, stage="s", config_hash="a", schema_version=1)
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    write_parquet(b, path, stage="s", config_hash="a", schema_version=1)
+    assert path.stat().st_mtime_ns > 1_000_000_000  # the swap counts as a change

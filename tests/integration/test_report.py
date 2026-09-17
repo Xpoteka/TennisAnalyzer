@@ -635,3 +635,62 @@ def test_metrics_stage_names_the_columns_it_is_missing(tmp_path: Path, data_root
     )
     with pytest.raises(UserError, match="l_wrist_speed"):
         metrics.run(StageContext(session, _config(data_root), "h", get_logger(), "metrics"))
+
+
+def test_the_fallback_reports_per_metric_counts_like_duckdb(
+    tmp_path: Path, data_root: Path
+) -> None:
+    """A metric that does not apply to a stroke type counts zero swings, not all of them."""
+    from tennis.reporting import _trend_table_without_duckdb, trend_table
+
+    rows = [_metric_row(i, "volley", 1.0 + i) for i in range(3)]
+    for row in rows:
+        row["unit_turn_lead_time"] = float("nan")  # groundstrokes only
+    _write_session(tmp_path, data_root, rows=rows)
+    config = _config(data_root)
+    fast = trend_table(config)[0]
+    slow = _trend_table_without_duckdb(config, since=None)[0]
+    assert fast["contact_height_count"] == slow["contact_height_count"] == 3
+    assert fast["unit_turn_lead_time_count"] == slow["unit_turn_lead_time_count"] == 0
+    for name in metrics.metric_names():
+        assert fast[f"{name}_count"] == slow[f"{name}_count"], name
+
+
+def test_disabling_labels_in_the_config_keeps_them_out_of_clips_and_the_report(
+    tmp_path: Path, data_root: Path
+) -> None:
+    """A labels.parquet from an earlier run must not survive `labels.enabled: false`."""
+    from tennis.config import LabelsConfig
+    from tennis.stages.clips import swing_labels
+
+    # Cohen's d needs two groups of at least two, so label three good and three late.
+    rows = [_metric_row(i, "forehand", 1.0 + i * 0.3) for i in range(6)]
+    label_rows = [
+        {
+            "swing_id": i, "contact_id": i, "label": "good" if i < 3 else "late",
+            "word": "good" if i < 3 else "late", "t_word": 1.0, "t_contact": 1.0,
+            "confidence": 0.9, "source": "voice",
+        }
+        for i in range(6)
+    ]  # fmt: skip
+    session = _write_session(tmp_path, data_root, rows=rows, labels=label_rows)
+
+    on = _config(data_root)
+    assert swing_labels(session, on)[0] == ["good"] and swing_labels(session, on)[5] == ["late"]
+    assert 'id="labels"' in _build_report(session, data_root)
+
+    off = _config(data_root, labels=LabelsConfig(enabled=False))
+    assert swing_labels(session, off) == {}
+    report.run(StageContext(session, off, "h", get_logger(), "report"))
+    assert 'id="labels"' not in session.path("report.html").read_text()
+
+
+def test_turning_labels_off_changes_the_clip_and_report_config_hashes() -> None:
+    """Otherwise the cache would serve a report built with the labels still in it."""
+    from tennis.config import LabelsConfig
+
+    on = Config()
+    off = Config(labels=LabelsConfig(enabled=False))
+    for name in ("clips", "report"):
+        stage = STAGES_BY_NAME[name]
+        assert stage.config_hash(on) != stage.config_hash(off), name

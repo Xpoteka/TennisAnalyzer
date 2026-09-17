@@ -25,8 +25,7 @@ import pyarrow.parquet as pq
 from tennis.config import Config
 from tennis.errors import UserError
 from tennis.session import Session, list_sessions, sessions_root
-from tennis.stages.clips import INDEX_NAME
-from tennis.stages.labels import read_labels
+from tennis.stages.clips import INDEX_NAME, swing_labels
 from tennis.stages.metrics import REGISTRY
 from tennis.util.io import read_json
 
@@ -45,6 +44,10 @@ class SessionMetrics:
     date: str
     means: dict[tuple[str, str], float]  # (stroke type, metric) -> mean
     stds: dict[tuple[str, str], float]
+    # (stroke type, metric) -> how many swings had a finite value. Per metric, not per
+    # stroke type: a metric that does not apply to a stroke type, or whose keypoints were
+    # missing, is counted on fewer swings than the group holds.
+    metric_counts: dict[tuple[str, str], int]
     counts: dict[str, int]  # stroke type -> swings
 
 
@@ -71,13 +74,15 @@ def read_summary(session: Session) -> SessionMetrics | None:
     rows = pq.read_table(path).to_pylist()
     means: dict[tuple[str, str], float] = {}
     stds: dict[tuple[str, str], float] = {}
+    metric_counts: dict[tuple[str, str], int] = {}
     counts: dict[str, int] = {}
     for row in rows:
         key = (str(row["stroke_type"]), str(row["metric"]))
         means[key] = float(row["mean"])
         stds[key] = float(row["std"]) if row["std"] is not None else float("nan")
+        metric_counts[key] = int(row["count"])
         counts[key[0]] = max(counts.get(key[0], 0), int(row["count"]))
-    return SessionMetrics(session.id, session_date(session), means, stds, counts)
+    return SessionMetrics(session.id, session_date(session), means, stds, metric_counts, counts)
 
 
 def history(
@@ -169,7 +174,9 @@ def _trend_table_without_duckdb(config: Config, since: str | None) -> list[dict[
             for name in REGISTRY:
                 row[f"{name}_mean"] = summary.means.get((stroke_type, name))
                 row[f"{name}_std"] = summary.stds.get((stroke_type, name))
-                row[f"{name}_count"] = count
+                # Per metric, matching what DuckDB counts: a metric that does not apply to
+                # this stroke type has no summary row at all, so it counts zero swings.
+                row[f"{name}_count"] = summary.metric_counts.get((stroke_type, name), 0)
             rows.append(row)
     return rows
 
@@ -363,9 +370,7 @@ def build_session_report(session: Session, config: Config) -> SessionReport:
             raise UserError(f"session '{session.id}' has no {name}; run 'tennis process' first")
     rows = pq.read_table(session.path("metrics.parquet")).to_pylist()
     summary_rows = pq.read_table(session.path("metrics_summary.parquet")).to_pylist()
-    labels_by_swing: dict[int, list[str]] = {}
-    for row in read_labels(session):
-        labels_by_swing.setdefault(int(row["swing_id"]), []).append(str(row["label"]))
+    labels_by_swing = swing_labels(session, config)
 
     past = history(config, before=session.id)
     baseline = rolling_baseline(past, config.report.rolling_sessions)

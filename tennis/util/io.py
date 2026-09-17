@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from tennis import __version__
@@ -119,7 +120,12 @@ def same_data(old: pa.Table, new: pa.Table) -> bool:
         a, b = old.column(field.name), new.column(field.name)
         if a.equals(b):
             continue
-        if not pa.types.is_floating(field.type) or a.null_count != b.null_count:
+        if not pa.types.is_floating(field.type):
+            return False
+        # ``to_numpy`` renders a null as NaN, so the null positions have to be compared
+        # before the values: otherwise [null, NaN] and [NaN, null] would both become
+        # [NaN, NaN] and compare equal.
+        if not pc.is_null(a).equals(pc.is_null(b)):
             return False
         left = np.asarray(a.to_numpy(zero_copy_only=False), dtype=np.float64)
         right = np.asarray(b.to_numpy(zero_copy_only=False), dtype=np.float64)

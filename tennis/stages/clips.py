@@ -59,7 +59,7 @@ INPUTS = (
 )
 OPTIONAL_INPUTS = ("labels.parquet",)
 OUTPUTS = ("clips/index.json",)
-CONFIG_KEYS = ("clips", "player", "pose.hwaccel", "pose.kp_conf_min")
+CONFIG_KEYS = ("clips", "player", "pose.hwaccel", "pose.kp_conf_min", "labels.enabled")
 
 INDEX_NAME = "clips/index.json"
 CLIPS_DIR = "clips"
@@ -190,12 +190,26 @@ def clip_path(session: Session, swing_id: int) -> Path:
     return session.dir / CLIPS_DIR / f"{swing_id}.mp4"
 
 
+def swing_labels(session: Session, config: Config) -> dict[int, list[str]]:
+    """Voice labels per swing, or nothing when ``labels.enabled`` is off.
+
+    A ``labels.parquet`` left behind by an earlier run is ignored when the labels stage is
+    turned off in the config, so clips and the report do not quietly keep using labels that
+    the config says not to produce. ``--no-labels`` is deliberately not the same thing: it
+    skips the slow transcription for one run without changing what the report says.
+    """
+    if not config.labels.enabled:
+        return {}
+    out: dict[int, list[str]] = {}
+    for row in read_labels(session):
+        out.setdefault(int(row["swing_id"]), []).append(str(row["label"]))
+    return out
+
+
 def run(ctx: StageContext) -> None:
     session, config = ctx.session, ctx.config
     rows = pq.read_table(session.path("metrics.parquet")).to_pylist()
-    labels_by_swing: dict[int, list[str]] = {}
-    for row in read_labels(session):
-        labels_by_swing.setdefault(int(row["swing_id"]), []).append(str(row["label"]))
+    labels_by_swing = swing_labels(session, config)
     selections = select_swings(rows, labels_by_swing, config.clips.max_per_label)
 
     directory = session.dir / CLIPS_DIR
