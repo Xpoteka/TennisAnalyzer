@@ -13,7 +13,7 @@ import pytest
 
 from tennis.config import Config, PathsConfig
 from tennis.errors import StageError
-from tennis.session import Session, create_or_reuse_session
+from tennis.session import SOURCE_INPUT, Session, create_or_reuse_session
 from tennis.stages import STAGES, run_pipeline, stage_status
 from tennis.util.log import get_logger
 from tests.conftest import MakeVideo, implemented_stages, needs_ffmpeg
@@ -77,17 +77,20 @@ def test_ingest_is_cached_and_rerun_on_demand(make_video: MakeVideo, data_root: 
     assert run_pipeline(session, cfg, get_logger(), from_stage=1) == both
     assert run_pipeline(session, cfg, get_logger(), from_stage=2) == implemented_stages("contacts")
 
-    # A deleted output reruns ingest. Its outputs come out identical, so they keep their
-    # old timestamps and nothing downstream reruns.
+    # A deleted output reruns ingest, and the stages that read the recreated audio.wav.
+    # Their outputs come out identical, so they keep their old timestamps and nothing
+    # further downstream reruns.
     (session.dir / "audio.wav").unlink()
     assert stage_status(session, STAGES[0], cfg) == "stale"
-    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "contacts"]
+    readers_of_audio = [s.name for s in STAGES if "audio.wav" in s.inputs]
+    assert run_pipeline(session, cfg, get_logger()) == ["ingest", *readers_of_audio]
     assert run_pipeline(session, cfg, get_logger()) == []
 
     # A touched source file (e.g. copied again) reruns the stages that read it, once.
     now = time.time()
     os.utime(video, (now + 5, now + 5))
-    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "pose"]
+    readers_of_source = [s.name for s in STAGES if SOURCE_INPUT in s.inputs]
+    assert run_pipeline(session, cfg, get_logger()) == readers_of_source
     assert run_pipeline(session, cfg, get_logger()) == []
 
     # Changing a detection option reruns contacts; the (empty) result is unchanged, so the

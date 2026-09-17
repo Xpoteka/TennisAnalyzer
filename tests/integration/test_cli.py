@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tennis.cli import main
+from tennis.stages import STAGES
 from tests.conftest import MakeVideo, implemented_stages, needs_ffmpeg
 
 
@@ -110,7 +111,8 @@ def test_process_then_list(
     header, row = out.strip().splitlines()
     assert header.split()[:3] == ["session", "ingest", "contacts"]
     n = len(implemented_stages())
-    assert row.split()[1 : n + 2] == ["ok"] * n + ["n/a"]
+    n_missing = len(STAGES) - n
+    assert row.split()[1:] == ["ok"] * n + ["n/a"] * n_missing
 
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0
@@ -121,7 +123,8 @@ def test_process_then_list(
         capsys,
     )
     assert code == 1
-    assert "not implemented yet" in err
+    expected = "not implemented yet" if n < len(STAGES) else "--from-stage must be between"
+    assert expected in err
 
 
 @needs_ffmpeg

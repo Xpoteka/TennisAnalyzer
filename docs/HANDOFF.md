@@ -16,8 +16,8 @@
 | M2 | Contact detection and tuning tool | Merged (PR #2) | **Open.** Needs about 100 frame-accurate own-hit labels from a clip-on-mic session (§10.3). Only coarse Wingfield labels exist so far. |
 | M3 | Pose extraction, player selection, review video | Merged (PR #3) | Visual review by the product owner (PO). 97% of frames tracked on 20 Wingfield swings. No formal sign-off yet. |
 | M4 | Cleaning, normalization, QC, confirmation, two-player identity | Merged (PR #4) | QC pass rate 86% for near-side own hits (target ≥ 80%). Trajectory plots done. See `docs/validation/M4_cleaning.md`. |
-| M5 | Stroke classification and eval tool | Built | **Open.** `tennis eval-classifier` exists and is tested; the ≥ 90% accuracy number has never been measured, because it needs the Wingfield stroke labels run against a session whose pose is up to date. |
-| M6 | Metrics, aggregation, outliers | Built | Metrics implemented with one unit test each, and a determinism test that requires byte-identical Parquet across reruns. **Caveat: the spec's §6.6 table was not in the repository**, so the metric list was reconstructed — see below. |
+| M5 | Stroke classification and eval tool | Built | **Fails.** Measured on 2026-09-17 against the Wingfield stroke labels: **58% accuracy** (49/84 matched swings; target ≥ 90%). Serves are the main miss. See §3 and `docs/validation/M5_classifier.md`. |
+| M6 | Metrics, aggregation, outliers | Built | Metrics implemented with one unit test each, and a determinism test that requires byte-identical Parquet across reruns. On the Wingfield session, forced reruns of stages 4–6 give byte-identical `strokes`, `metrics` and `metrics_summary` files (checked 2026-09-17). **Caveat: the spec's §6.6 table was not in the repository**, so the metric list was reconstructed — see below. |
 | M7 | Clips and HTML report with trends | Built | **Open.** The report opens offline and has every §6.9 section, but "with ≥ 3 sessions" cannot be shown: only two sessions exist and one has no pose. |
 | M8 | Voice labels and label analysis | Built | **Open.** `tennis eval-labels` exists and is tested on synthetic transcripts; the ≥ 80% match rate needs a session recorded with the words spoken. |
 
@@ -63,7 +63,7 @@ tennis/
 scripts/wingfield_labels.py   Wingfield .xlsx export → label CSVs
 ```
 
-About 8,700 lines of code, and 272 tests (`uv run pytest`, about 11 s, no network, no real model, no whisper). The same checks run in CI: ruff, ruff format, and mypy in strict mode.
+About 8,700 lines of code, and 281 tests (`uv run pytest`, about 45 s with ffmpeg installed, no network, no real model, no whisper). Tests marked `needs_ffmpeg` are **skipped** when ffmpeg is missing, so a green run without ffmpeg proves little: six of them were broken by M8 and went unnoticed until 2026-09-17. The same checks run in CI: ruff, ruff format, and mypy in strict mode.
 
 ### Data you can use
 
@@ -127,7 +127,18 @@ Stage 5 reads `swings.parquet`, `swing_info.parquet`, `keypoints.parquet` and `m
 
 The box bottom the volley rule needs comes from `keypoints.parquet` (`bbox_y2` of the swing's slot at the contact frame), with the lowest cleaned keypoint as a fallback, rather than being added to `swings.parquet` — that would have meant rerunning stage 4.
 
-**Still open:** the ≥ 90% accuracy number. Run it against the Wingfield stroke labels:
+**Result (2026-09-17): 58% accuracy, below the 90% target.** The run matched 84 labelled own shots to classified swings, out of 144 labels and 194 swings in range:
+
+| truth \ predicted | serve | forehand | backhand | volley | recall |
+|---|---|---|---|---|---|
+| serve | 7 | 12 | 7 | 0 | 0.27 |
+| forehand | 0 | 33 | 4 | 0 | 0.89 |
+| backhand | 0 | 10 | 9 | 0 | 0.47 |
+| volley | 0 | 2 | 0 | 0 | 0.00 |
+
+The weakest rule is the serve rule. For labelled serves, the racket wrist at the contact frame is a median 0.1 torso lengths *below* the nose (10th–90th percentile: −1.05 to +0.67), while the rule requires it to be 0.3 above. At 30 fps, the contact frame often misses the wrist's highest point, and from behind the left/right wrist labels can swap. Things to try: the highest point of *either* wrist over a short window around contact (for example [−0.3, +0.1] s) instead of the single contact frame; or add a rule that detects the ball toss. Backhands that are classified as forehands point the same way: the wrist's x position at the single contact frame is a noisy signal. No volley was ever predicted, and only two labelled volleys were matched.
+
+To rerun the measurement:
 
 ```bash
 uv run tennis eval-classifier 2025-01-10_wingfield --config /tmp/wingfield.yaml \
