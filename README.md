@@ -2,7 +2,7 @@
 
 A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
-**Status: milestone M4.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, **pose extraction** with a review video, and **cleaning, normalization, QC and own-hit confirmation**. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
+**Status: milestone M4.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, **pose extraction** with a review video, and **cleaning, normalization, QC and own-hit confirmation**. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together. Continuing development? Start with [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Setup
 
