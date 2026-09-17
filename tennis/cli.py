@@ -165,6 +165,54 @@ def pose_preview(
     typer.echo(f"wrote {path} and {path.with_suffix('.csv').name}", err=True)
 
 
+@app.command()
+def players(
+    session_id: str,
+    config: ConfigOpt = None,
+    count: Annotated[int, typer.Option(min=1, help="Thumbnails per player.")] = 6,
+) -> None:
+    """Show who was identified as you, which side you played on, and your racket hand."""
+    from tennis.review import render_players
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    path, info = render_players(session, cfg, per_player=count)
+    hand = info.get("handedness") or {}
+    typer.echo(f"you: player {info.get('me')} ({info.get('me_reason')})")
+    typer.echo(f"racket hand: {hand.get('hand')} ({hand.get('reason')}; votes {hand.get('votes')})")
+    typer.echo(f"hits: {info.get('hits')}")
+    if not info.get("identities_resolved"):
+        typer.echo("only one player was tracked; everyone near the camera is treated as you")
+    for seg in info.get("sides") or []:
+        start, end = float(seg["start"]), float(seg["end"])
+        span = f"{int(start // 60):3d}:{start % 60:04.1f} - {int(end // 60):3d}:{end % 60:04.1f}"
+        typer.echo(f"  {span}  you are {seg['side']:4s} ({seg['windows']} windows)")
+    typer.echo(f"wrote {path}; if the wrong player is marked as you, set player.identity "
+               "to the other letter in your config")  # fmt: skip
+
+
+@app.command("swing-plots")
+def swing_plots(
+    session_id: str,
+    config: ConfigOpt = None,
+    count: Annotated[int, typer.Option(min=1, help="Swings to plot.")] = 6,
+    seed: Annotated[int, typer.Option(help="Random seed for the sample.")] = 0,
+    all_swings: Annotated[
+        bool, typer.Option("--all", help="Sample from all QC-passing swings, not just confirmed.")
+    ] = False,
+    out: Annotated[Path | None, typer.Option(help="Output HTML file.")] = None,
+) -> None:
+    """Plot raw vs cleaned wrist trajectories for sampled swings (M4 review)."""
+    from tennis.review import render_swing_plots
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    path = render_swing_plots(
+        session, cfg, count=count, seed=seed, confirmed_only=not all_swings, out=out
+    )
+    typer.echo(f"wrote {path}", err=True)
+
+
 @app.command("tune-contacts")
 def tune_contacts(
     session_id: str,
@@ -263,6 +311,77 @@ def _float_list(value: str | None, name: str) -> list[float] | None:
     if not items:
         raise UserError(f"--{name}: no values given")
     return items
+
+
+@app.command("eval-contacts")
+def eval_contacts(
+    session_id: str,
+    labels: Annotated[
+        Path, typer.Option(help="CSV of your own impact times (video time, s or m:ss.sss).")
+    ],
+    config: ConfigOpt = None,
+    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
+    label_offset: Annotated[
+        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
+    ] = 0.0,
+    label_resolution: Annotated[
+        float,
+        typer.Option(help="Label precision in seconds: a label t means [t, t + this]."),
+    ] = 0.0,
+    segments: Annotated[
+        Path | None,
+        typer.Option(
+            help="CSV of start,end ranges to evaluate (e.g. rallies), on the labels' clock."
+        ),
+    ] = None,
+    speeds: Annotated[
+        str | None, typer.Option(help="wrist_confirm_min_speed values to sweep.")
+    ] = None,
+    windows: Annotated[
+        str | None, typer.Option(help="wrist_confirm_window_s values to sweep.")
+    ] = None,
+    top: Annotated[int, typer.Option(help="Sweep rows to show.")] = 12,
+    report_path: Annotated[
+        Path | None, typer.Option("--report", help="Also write the results as markdown.")
+    ] = None,
+) -> None:
+    """Score own-hit detection (audio first pass and wrist confirmation) against labels."""
+    from tennis.evaluation import (
+        DEFAULT_SPEEDS,
+        DEFAULT_WINDOWS,
+        evaluate_contacts,
+        format_contact_eval,
+        write_contact_eval,
+    )
+    from tennis.stages.clean import resolved_handedness
+    from tennis.stages.contacts import LabelSpec, make_scorer
+    from tennis.validation import read_segments, read_time_labels
+
+    cfg = load_config(config)
+    session = open_session(cfg.paths.data_root, session_id)
+    spec = LabelSpec(
+        times_s=read_time_labels(labels),
+        tolerance_s=tolerance_ms / 1000,
+        resolution_s=label_resolution,
+        offset_s=label_offset,
+    )
+    scorer = make_scorer(session, spec, read_segments(segments) if segments else None)
+    result = evaluate_contacts(
+        session,
+        scorer,
+        (
+            cfg.audio.wrist_confirm_min_speed,
+            cfg.audio.wrist_confirm_window_s,
+            cfg.audio.wrist_confirm_wrist,
+        ),
+        resolved_handedness(session, cfg),
+        speeds=_float_list(speeds, "speeds") or DEFAULT_SPEEDS,
+        windows=_float_list(windows, "windows") or DEFAULT_WINDOWS,
+    )
+    typer.echo(format_contact_eval(result, top=top))
+    if report_path is not None:
+        write_contact_eval(result, report_path, top=top)
+        typer.echo(f"wrote {report_path}", err=True)
 
 
 @app.command("eval-classifier")

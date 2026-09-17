@@ -2,7 +2,7 @@
 
 A local command-line pipeline. It takes a video of a tennis session filmed from a fixed tripod, finds each ball impact, and measures the player's technique. It compares the player against their own history, not against an absolute standard.
 
-**Status: milestone M3.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, and **pose extraction** with a review video. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
+**Status: milestone M4.** Built so far: the scaffold, config, CLI, stage caching, the **ingest** stage, **contact detection** with its tuning tool, **pose extraction** with a review video, and **cleaning, normalization, QC and own-hit confirmation**. The other stages are registered, and `tennis list` shows them as `n/a` until they are built. `tennis process` stops cleanly after the last stage that exists. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the stages fit together.
 
 ## Setup
 
@@ -22,7 +22,7 @@ Run the CLI with `uv run tennis ...`, or activate `.venv` and call `tennis` dire
 - Mount the camera on a tripod in the **same position every session**: behind the baseline, slightly off-centre, raised.
 - Use 100–120 fps if you can. The pipeline is designed for 30–240 fps, including variable frame rate. Lower rates (for example 24 fps) still work, but ingest warns because contact timing and wrist speeds will be less precise.
 - Record the clip-on microphone **into the camera file**. Ingest fails if the video has no audio track.
-- Keep yourself the largest person on the near side of the court. A hitting partner on the far side is fine.
+- One person per half of the court works best: you and your hitting partner. Changing ends is fine; the pipeline tells the two of you apart by clothing color. Wear something that looks clearly different from your partner.
 - Keep the camera clock correct. Session IDs come from the video's creation timestamp.
 - Keep the video files stored locally. iCloud's "Optimize Mac Storage" can remove the local copy, and reading such a file then stalls while iCloud downloads it again.
 - Leave the raw files where they are. The pipeline never copies or changes them; each session only holds a symlink to the file.
@@ -35,6 +35,10 @@ tennis list                               # sessions and the status of each stag
 tennis report <session-id>                # M7
 tennis trends [--since DATE]              # M7
 tennis tune-contacts <session-id> --labels PATH [--k ...] [--cutoff ...] [--db ...] [--report PATH]
+tennis eval-contacts <session-id> --labels PATH [--speeds ...] [--windows ...] [--report PATH]
+tennis pose-preview <session-id> [--count 20] [--speed 0.5]
+tennis swing-plots <session-id> [--count 6] [--all]
+tennis players <session-id>                 # who is you, which side, racket hand
 tennis eval-classifier <session-id> --labels PATH  # M5
 tennis inspect <session-id> <swing-id>    # M6
 ```
@@ -65,6 +69,41 @@ uv run tennis pose-preview <session-id> --count 20 --speed 0.5
 ```
 
 It writes `data/sessions/<id>/debug/pose_preview.mp4`, plus a CSV of the tracked frame ratio and track resets per swing.
+
+### Who is who, and your racket hand
+
+Pose tracks the near-court and the far-court player. Stage 4 matches their clothing colors to two players, A and B, across the whole session, so it follows you when you change ends.
+
+- **Hits:** each hit goes to the player whose wrist speeds up the most at that moment.
+- **You:** the player whose hits are clearly louder on your clip-on mic. Without a player-worn mic, you're A, the near player at the start.
+- **Racket hand:** `player.handedness: auto` picks the wrist that moves faster at your own near-side hits.
+- **Far side:** your far-side swings are detected but not measured, because far-side poses are too small.
+
+Check the result with:
+
+```bash
+uv run tennis players <session-id>
+```
+
+It prints the decision, the hand, and the times you were on each side, and writes `debug/players.jpg` with thumbnails of A and B. If it picked the wrong player, set `player.identity: B` (or `A`) in your config. You can also fix `player.handedness` by hand. Only stage 4 reruns.
+
+### Cleaning and own-hit confirmation
+
+Stage 4 does the following:
+
+- cleans the keypoints;
+- turns each candidate contact into a normalized swing;
+- runs the spec's QC checks;
+- confirms own hits: the wrist speed must peak near the sound.
+
+To review and tune it:
+
+```bash
+uv run tennis swing-plots <session-id> --count 6          # raw vs cleaned wrist trajectories
+uv run tennis eval-contacts <session-id> --labels labels/contacts_<session-id>.csv
+```
+
+`eval-contacts` accepts the same label options as `tune-contacts`. It scores the audio first pass, the wrist confirmation, and both together, then sweeps the confirmation settings. Nothing is recomputed except the confirmation rule, so it takes seconds.
 
 ### Tuning contact detection
 

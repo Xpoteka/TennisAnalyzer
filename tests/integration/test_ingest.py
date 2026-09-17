@@ -16,7 +16,7 @@ from tennis.errors import StageError
 from tennis.session import Session, create_or_reuse_session
 from tennis.stages import STAGES, run_pipeline, stage_status
 from tennis.util.log import get_logger
-from tests.conftest import MakeVideo, needs_ffmpeg
+from tests.conftest import MakeVideo, implemented_stages, needs_ffmpeg
 
 pytestmark = needs_ffmpeg
 
@@ -35,7 +35,7 @@ def test_ingest_writes_metadata_and_audio(make_video: MakeVideo, data_root: Path
     video = make_video(seconds=2.0, fps=120)
     session = _session(data_root, video)
     ran = run_pipeline(session, _config(data_root), get_logger())
-    assert ran == ["ingest", "contacts", "pose"]
+    assert ran == implemented_stages()
     assert (session.dir / "frame_times.parquet").exists()
 
     meta = json.loads((session.dir / "metadata.json").read_text())
@@ -68,31 +68,37 @@ def test_ingest_is_cached_and_rerun_on_demand(make_video: MakeVideo, data_root: 
     video = make_video()
     session = _session(data_root, video)
     cfg = _config(data_root)
-    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "contacts", "pose"]
+    assert run_pipeline(session, cfg, get_logger()) == implemented_stages()
     assert run_pipeline(session, cfg, get_logger()) == []
     assert stage_status(session, STAGES[0], cfg) == "ok"
 
-    both = ["ingest", "contacts", "pose"]
+    both = implemented_stages()
     assert run_pipeline(session, cfg, get_logger(), force=True) == both
     assert run_pipeline(session, cfg, get_logger(), from_stage=1) == both
-    assert run_pipeline(session, cfg, get_logger(), from_stage=2) == ["contacts", "pose"]
+    assert run_pipeline(session, cfg, get_logger(), from_stage=2) == implemented_stages("contacts")
 
+    # A deleted output reruns ingest. Its outputs come out identical, so they keep their
+    # old timestamps and nothing downstream reruns.
     (session.dir / "audio.wav").unlink()
     assert stage_status(session, STAGES[0], cfg) == "stale"
-    # ingest rewrites audio.wav, which makes contacts stale too.
-    assert run_pipeline(session, cfg, get_logger()) == both
+    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "contacts"]
+    assert run_pipeline(session, cfg, get_logger()) == []
 
-    # A newer source file (e.g. re-exported) invalidates everything downstream.
+    # A touched source file (e.g. copied again) reruns the stages that read it, once.
     now = time.time()
-    for name in ("metadata.json", "audio.wav", "frame_times.parquet", "contacts.parquet"):
-        os.utime(session.dir / name, (now - 100, now - 100))
-    os.utime(video, (now - 50, now - 50))
-    assert run_pipeline(session, cfg, get_logger()) == both
+    os.utime(video, (now + 5, now + 5))
+    assert run_pipeline(session, cfg, get_logger()) == ["ingest", "pose"]
+    assert run_pipeline(session, cfg, get_logger()) == []
 
-    # Changing an audio option reruns contacts and, since its output changed, pose.
+    # Changing a detection option reruns contacts; the (empty) result is unchanged, so the
+    # later stages stay up to date. Changing an unrelated audio option reruns nothing.
     louder = cfg.model_copy(update={"audio": cfg.audio.model_copy(update={"onset_k": 9.0})})
     assert stage_status(session, STAGES[1], louder) == "stale"
-    assert run_pipeline(session, louder, get_logger()) == ["contacts", "pose"]
+    assert run_pipeline(session, louder, get_logger()) == ["contacts"]
+    confirm = louder.model_copy(
+        update={"audio": louder.audio.model_copy(update={"wrist_confirm_min_speed": 9.0})}
+    )
+    assert run_pipeline(session, confirm, get_logger()) == ["clean"]
 
 
 def test_ingest_does_not_touch_source(make_video: MakeVideo, data_root: Path) -> None:
@@ -142,11 +148,7 @@ def test_corrupt_video_fails_ingest(tmp_path: Path, data_root: Path) -> None:
 def test_low_frame_rate_is_processed_with_warning(make_video: MakeVideo, data_root: Path) -> None:
     video = make_video("24fps.mp4", fps=24)
     session = _session(data_root, video)
-    assert run_pipeline(session, _config(data_root), get_logger()) == [
-        "ingest",
-        "contacts",
-        "pose",
-    ]
+    assert run_pipeline(session, _config(data_root), get_logger()) == implemented_stages()
     meta = json.loads((session.dir / "metadata.json").read_text())
     assert meta["fps"] == pytest.approx(24)
     assert len(meta["warnings"]) == 1

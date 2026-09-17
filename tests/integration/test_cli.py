@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tennis.cli import main
-from tests.conftest import MakeVideo, needs_ffmpeg
+from tests.conftest import MakeVideo, implemented_stages, needs_ffmpeg
 
 
 def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
@@ -91,7 +91,7 @@ def test_process_then_list(
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0, err
     assert "session 2026-09-20_" in err
-    assert "done: ingest, contacts, pose" in err
+    assert f"done: {', '.join(implemented_stages())}" in err
 
     sessions = list((config_file.parent / "data" / "sessions").iterdir())
     assert len(sessions) == 1
@@ -101,14 +101,16 @@ def test_process_then_list(
     assert code == 0
     header, row = out.strip().splitlines()
     assert header.split()[:3] == ["session", "ingest", "contacts"]
-    assert row.split()[1:5] == ["ok", "ok", "ok", "n/a"]
+    n = len(implemented_stages())
+    assert row.split()[1 : n + 2] == ["ok"] * n + ["n/a"]
 
     code, _, err = _run(["process", str(video), "--config", str(config_file)], capsys)
     assert code == 0
     assert "everything up to date" in err
 
     code, _, err = _run(
-        ["process", str(video), "--config", str(config_file), "--from-stage", "4"], capsys
+        ["process", str(video), "--config", str(config_file), "--from-stage", str(n + 1)],
+        capsys,
     )
     assert code == 1
     assert "not implemented yet" in err

@@ -14,6 +14,14 @@ MakeVideo = Callable[..., Path]
 COUNTER_PERIOD = 110  # keeps the counter pattern's luma within 16..235
 
 
+def implemented_stages(start: str = "ingest") -> list[str]:
+    """Names of the stages that run today (optional ones excluded), from ``start`` on."""
+    from tennis.stages import STAGES
+
+    names = [s.name for s in STAGES if s.implemented and not s.optional]
+    return names[names.index(start) :]
+
+
 def _ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *args], check=True)
 

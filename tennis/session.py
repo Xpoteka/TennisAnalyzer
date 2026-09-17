@@ -90,17 +90,38 @@ class Session:
         data = read_json(path)
         return data if isinstance(data, dict) else None
 
-    def write_stamp(self, stage: str, config_hash: str, **extra: Any) -> None:
-        write_json(
-            self.stamp_path(stage),
-            {
-                "stage": stage,
-                "pipeline_version": __version__,
-                "config_hash": config_hash,
-                "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                **extra,
-            },
-        )
+    def fingerprints(self, names: tuple[str, ...]) -> dict[str, list[int] | None]:
+        """(mtime_ns, size) of each named file; None if it does not exist."""
+        out: dict[str, list[int] | None] = {}
+        for name in names:
+            try:
+                st = self.path(name).stat()  # follows the source symlink
+            except FileNotFoundError:
+                out[name] = None
+                continue
+            out[name] = [st.st_mtime_ns, st.st_size]
+        return out
+
+    def write_stamp(
+        self,
+        stage: str,
+        config_hash: str,
+        inputs: dict[str, list[int] | None] | None = None,
+        outputs: dict[str, list[int] | None] | None = None,
+        **extra: Any,
+    ) -> None:
+        stamp: dict[str, Any] = {
+            "stage": stage,
+            "pipeline_version": __version__,
+            "config_hash": config_hash,
+            "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            **extra,
+        }
+        if inputs is not None:
+            stamp["inputs"] = inputs
+        if outputs is not None:
+            stamp["outputs"] = outputs
+        write_json(self.stamp_path(stage), stamp)
 
     def clear_stamp(self, stage: str) -> None:
         self.stamp_path(stage).unlink(missing_ok=True)
@@ -111,9 +132,12 @@ class Session:
         """Why ``stage`` must run, or None when its outputs are up to date.
 
         Up to date means: the stage finished before (stamp present), with the same pipeline
-        version and the same hash of the config sections it depends on, all outputs exist,
-        and no input is newer than the oldest output. A config hash is used instead of the
-        config file's mtime so that editing unrelated options does not trigger reruns.
+        version and the same hash of the config values it depends on, all outputs exist,
+        and no input or output changed since that run. "Changed" compares each file's
+        modification time and size with the ones recorded in the stamp. Stamps written
+        before fingerprints existed fall back to "no input newer than the oldest output".
+        A config hash is used instead of the config file's mtime so that editing unrelated
+        options does not trigger reruns.
         """
         stamp = self.read_stamp(stage)
         if stamp is None:
@@ -122,12 +146,24 @@ class Session:
             return f"pipeline version changed ({stamp.get('pipeline_version')} -> {__version__})"
         if stamp.get("config_hash") != config_hash:
             return "config changed"
-        output_mtimes = []
         for name in outputs:
-            p = self.path(name)
-            if not p.exists():
+            if not self.path(name).exists():
                 return f"output missing: {name}"
-            output_mtimes.append(p.stat().st_mtime_ns)
+        recorded_in = stamp.get("inputs")
+        recorded_out = stamp.get("outputs")
+        if isinstance(recorded_in, dict) and isinstance(recorded_out, dict):
+            current_in = self.fingerprints(inputs)
+            for name in inputs:
+                if current_in[name] is None:
+                    return f"input missing: {name}"
+                if recorded_in.get(name) != current_in[name]:
+                    return f"input changed: {name}"
+            current_out = self.fingerprints(outputs)
+            for name in outputs:
+                if recorded_out.get(name) != current_out[name]:
+                    return f"output changed: {name}"
+            return None
+        output_mtimes = [self.path(name).stat().st_mtime_ns for name in outputs]
         for name in inputs:
             p = self.path(name)
             if not p.exists():  # follows symlinks: a dangling source link counts as missing

@@ -30,7 +30,7 @@ def test_default_file_in_cwd_is_used(tmp_path: Path) -> None:
 def test_empty_file_gives_defaults(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text("")
-    assert load_config(p).player.handedness == "right"
+    assert load_config(p).player.handedness == "auto"
 
 
 @pytest.mark.parametrize(
@@ -66,5 +66,17 @@ def test_section_hash_only_depends_on_named_sections() -> None:
     assert base.section_hash("audio") == other.section_hash("audio")
     assert base.section_hash("pose") != other.section_hash("pose")
     assert base.section_hash() == other.section_hash()
+    # Field-level keys only depend on that field.
+    k9 = Config.model_validate({"audio": {"onset_k": 9}})
+    other_audio = Config.model_validate({"audio": {"wrist_confirm_min_speed": 9}})
+    assert base.section_hash("audio.onset_k") != k9.section_hash("audio.onset_k")
+    assert base.section_hash("audio.onset_k") == other_audio.section_hash("audio.onset_k")
+    assert base.section_hash("audio") != other_audio.section_hash("audio")
+    # A whole section plus one of its fields hashes like the section alone.
+    assert base.section_hash("audio", "audio.onset_k") == base.section_hash("audio")
+    with pytest.raises(KeyError):
+        base.section_hash("audio.nope")
+    with pytest.raises(KeyError):
+        base.section_hash("nope")
     moved = Config.model_validate({"paths": {"data_root": "/elsewhere"}})
     assert base.section_hash("audio", "pose") == moved.section_hash("audio", "pose")
