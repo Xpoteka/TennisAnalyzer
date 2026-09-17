@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Lets CI be started by hand from the Actions tab. Without it, a workflow that never
-  # ran - because Actions were off when the commits were pushed - can only be started by
-  # pushing again, since enabling Actions does not replay past events.
-  workflow_dispatch:
 
 jobs:
   check:
