@@ -18,6 +18,9 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "jinja2>=3.1.6",
     "duckdb>=1.5.5",
+    # Pulled in by ultralytics anyway; listed so Linux can take them from the CPU index below.
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
 ]
 
 [project.scripts]
@@ -30,6 +33,17 @@ dev = [
     "mypy>=1.11",
     "types-PyYAML>=6.0",
 ]
+
+# On Linux (the Docker image, CI) PyTorch comes from its CPU-only index: the CUDA build is
+# several GB of NVIDIA libraries the server cannot use. macOS keeps the PyPI build (Apple GPU).
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [build-system]
 requires = ["hatchling"]

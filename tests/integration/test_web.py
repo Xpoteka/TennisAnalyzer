@@ -238,3 +238,235 @@ def test_a_config_that_does_not_validate_is_not_created(tmp_path: Path) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def _send(base: str, path: str, body: bytes, headers: dict[str, str] | None = None) -> Any:
+    request = urllib.request.Request(
+        base + path, body, {"Content-Type": "application/octet-stream", **(headers or {})}
+    )
+    with urllib.request.urlopen(request) as response:
+        return json.loads(response.read())
+
+
+def test_a_video_uploads_in_pieces_and_resumes_after_an_interruption(
+    server: tuple[str, ThreadingHTTPServer], tmp_path: Path
+) -> None:
+    base, _ = server
+    data = bytes(range(256)) * 40  # 10 KiB
+    q = f"/api/upload?kind=video&name=my%20session.MP4&size={len(data)}"
+    assert get(base, q) == {"done": False, "received": 0, "size": len(data)}
+
+    first = _send(base, q + "&offset=0", data[:4000])
+    assert first == {"done": False, "received": 4000, "size": len(data)}
+
+    # A piece sent again after a dropped connection is refused, and says where to go on.
+    with pytest.raises(urllib.error.HTTPError) as info:
+        _send(base, q + "&offset=0", data[:4000])
+    assert info.value.code == 409
+    assert json.loads(info.value.read())["received"] == 4000
+
+    # The page reloads and asks how far it got: the server kept the first piece.
+    assert get(base, q)["received"] == 4000
+    last = _send(base, q + "&offset=4000", data[4000:])
+    assert last["done"] is True and last["reused"] is False
+    final = tmp_path / "data" / "uploads" / "my_session.MP4"
+    assert Path(last["path"]) == final.resolve()
+    assert final.read_bytes() == data
+    assert not list((tmp_path / "data" / "uploads" / ".partial").iterdir())
+
+    # Dropping the same file again does not send it again.
+    again = get(base, q)
+    assert again["done"] is True and again["reused"] is True
+
+
+def test_the_library_lists_videos_and_the_sessions_that_use_them(
+    server: tuple[str, ThreadingHTTPServer], tmp_path: Path
+) -> None:
+    base, _ = server
+    uploads = tmp_path / "data" / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "a.mp4").write_bytes(b"a" * 10)
+    (uploads / "b.mov").write_bytes(b"b" * 20)
+    (uploads / "notes.txt").write_text("not a video")
+    session = tmp_path / "data" / "sessions" / "2026-01-02_evening"
+    (session / "source.mp4").symlink_to("../../uploads/a.mp4")
+    partial = uploads / ".partial"
+    partial.mkdir()
+    (partial / "c.mp4.1000.part").write_bytes(b"c" * 300)
+
+    lib = get(base, "/api/videos")
+    by_name = {v["name"]: v for v in lib["videos"]}
+    assert set(by_name) == {"a.mp4", "b.mov"}
+    assert by_name["a.mp4"]["sessions"] == ["2026-01-02_evening"]
+    assert by_name["b.mov"]["sessions"] == []
+    assert lib["partial"] == [
+        {"name": "c.mp4", "size": 1000, "received": 300, "modified": lib["partial"][0]["modified"]}
+    ]
+    assert lib["disk"]["free"] > 0
+
+    # The video can be downloaded, with ranges for seeking.
+    with urllib.request.urlopen(base + by_name["b.mov"]["url"]) as response:
+        assert response.read() == b"b" * 20
+
+    deleted = post(base, "/api/videos/delete", {"name": "a.mp4"})
+    assert deleted == {"deleted": "a.mp4", "sessions": ["2026-01-02_evening"]}
+    assert not (uploads / "a.mp4").exists()
+    with pytest.raises(urllib.error.HTTPError) as info:
+        post(base, "/api/videos/delete", {"name": "../config.yaml"})
+    assert info.value.code == 404
+    assert (tmp_path / "config.yaml").exists()
+
+    post(base, "/api/upload/discard?kind=video&name=c.mp4&size=1000", {})
+    assert get(base, "/api/videos")["partial"] == []
+
+
+def test_a_piece_larger_than_the_file_is_refused(server: tuple[str, ThreadingHTTPServer]) -> None:
+    base, _ = server
+    with pytest.raises(urllib.error.HTTPError) as info:
+        _send(base, "/api/upload?kind=video&name=x.mp4&size=3&offset=0", b"abcd")
+    assert info.value.code == 400
+
+
+@pytest.fixture
+def locked_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[str, ThreadingHTTPServer]]:
+    from tennis.web import auth
+
+    monkeypatch.setattr(auth, "FAILED_LOGIN_DELAY_S", 0.0)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"paths:\n  data_root: {tmp_path / 'data'}\n")
+    httpd, _ = make_server(
+        load_config(config_path), config_path, tmp_path, "127.0.0.1", 0, password="correct horse"
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}", httpd
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def test_with_a_password_nothing_is_served_before_logging_in(
+    locked_server: tuple[str, ThreadingHTTPServer], tmp_path: Path
+) -> None:
+    base, _ = locked_server
+    for path in ("/api/sessions", "/api/videos", "/files/data/.ui_secret"):
+        with pytest.raises(urllib.error.HTTPError) as info:
+            urllib.request.urlopen(base + path)
+        assert info.value.code == 401, path
+    with pytest.raises(urllib.error.HTTPError) as info:
+        post(base, "/api/jobs", {"command": "list", "values": {}})
+    assert info.value.code == 401
+
+    # The page itself sends the browser to the login form, which is served.
+    opener = urllib.request.build_opener(_NoRedirect)
+    with pytest.raises(urllib.error.HTTPError) as info:
+        opener.open(base + "/")
+    assert info.value.code == 303 and info.value.headers["Location"] == "/login"
+    with urllib.request.urlopen(base + "/login") as response:
+        assert b"Password" in response.read()
+
+    with pytest.raises(urllib.error.HTTPError) as info:
+        post(base, "/api/login", {"password": "wrong"})
+    assert info.value.code == 401
+
+    request = urllib.request.Request(
+        base + "/api/login",
+        json.dumps({"password": "correct horse"}).encode(),
+        {"Content-Type": "application/json", "X-Forwarded-Proto": "https"},
+    )
+    with urllib.request.urlopen(request) as response:
+        cookie = response.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Secure" in cookie
+    token = cookie.split(";")[0]
+
+    request = urllib.request.Request(base + "/api/sessions", headers={"Cookie": token})
+    with urllib.request.urlopen(request) as response:
+        assert json.loads(response.read()) == {"sessions": []}
+    assert get_with(base, "/api/meta", token)["auth"] is True
+
+    # Logged in or not, the signing secret in the data folder is never served.
+    with pytest.raises(urllib.error.HTTPError) as info:
+        get_with(base, "/files/data/.ui_secret", token)
+    assert info.value.code == 404
+
+    # A tampered cookie is refused.
+    with pytest.raises(urllib.error.HTTPError) as info:
+        get_with(base, "/api/sessions", token[:-1] + ("0" if token[-1] != "0" else "1"))
+    assert info.value.code == 401
+
+
+def get_with(base: str, path: str, cookie: str) -> Any:
+    request = urllib.request.Request(base + path, headers={"Cookie": cookie})
+    with urllib.request.urlopen(request) as response:
+        return json.loads(response.read())
+
+
+def test_a_write_through_a_reverse_proxy_is_same_origin(
+    server: tuple[str, ThreadingHTTPServer],
+) -> None:
+    """The proxy talks to us as 127.0.0.1; the browser's host comes as X-Forwarded-Host."""
+    base, _ = server
+    result = post(
+        base,
+        "/api/config",
+        {"text": "audio:\n  onset_k: 6\n"},
+        {"Origin": "https://tennis.example.com", "X-Forwarded-Host": "tennis.example.com"},
+    )
+    assert result["ok"] is True
+
+
+def test_serving_on_a_network_interface_needs_a_password(tmp_path: Path) -> None:
+    from tennis.errors import UserError
+    from tennis.web.server import serve
+
+    with pytest.raises(UserError, match="without a password"):
+        serve(load_config(None), None, tmp_path, host="0.0.0.0", port=0, open_browser=False)
+    with pytest.raises(UserError, match="at least"):
+        serve(
+            load_config(None),
+            None,
+            tmp_path,
+            host="0.0.0.0",
+            port=0,
+            open_browser=False,
+            password="short",
+        )
+
+
+def test_a_refused_request_does_not_garble_the_next_one_on_the_connection(
+    locked_server: tuple[str, ThreadingHTTPServer],
+) -> None:
+    """Browsers reuse connections: a body nobody read must not become the next request."""
+    import http.client
+
+    base, _ = locked_server
+    conn = http.client.HTTPConnection(base.removeprefix("http://"))
+    try:
+        # Refused before its body is looked at: not logged in.
+        conn.request("POST", "/api/logout", b"{}", {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        assert response.status == 401
+        response.read()
+        conn.request("POST", "/api/jobs", b'{"command": "list"}')
+        response = conn.getresponse()
+        assert response.status == 401
+        response.read()
+        conn.request("GET", "/login")
+        response = conn.getresponse()
+        assert response.status == 200
+        response.read()
+        # An upload piece refused unread closes the connection rather than leave it dirty.
+        conn.request("POST", "/api/upload?kind=video&name=x.mp4&size=3&offset=0", b"abc")
+        response = conn.getresponse()
+        assert response.status == 401
+        assert response.getheader("Connection") == "close"
+    finally:
+        conn.close()

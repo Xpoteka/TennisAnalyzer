@@ -109,6 +109,38 @@ def _print_status_table(sessions: list[Session], cfg: Config) -> None:
 
 
 @app.command()
+def relink(
+    search: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--dir",
+            help="Folder to look in; repeatable. Default: the uploads folder in the data root.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Only say what would be relinked.")
+    ] = False,
+    config: ConfigOpt = None,
+) -> None:
+    """Repoint sessions whose raw video moved, e.g. after copying the data folder to a server."""
+    from tennis.session import relink_missing_sources
+
+    cfg = load_config(config)
+    dirs = search or [cfg.paths.data_root / "uploads"]
+    results = relink_missing_sources(cfg.paths.data_root, dirs, dry_run=dry_run)
+    if not results:
+        typer.echo("every session's video is where its link says")
+        return
+    for r in results:
+        if r.found is None:
+            typer.echo(f"{r.session}: {Path(r.missing).name} not found (was {r.missing})")
+            continue
+        verb = "would link" if dry_run else "linked"
+        note = "" if r.same_file else "  (different modification time: its stages will rerun)"
+        typer.echo(f"{r.session}: {verb} {r.found}{note}")
+
+
+@app.command()
 def report(
     session_id: str,
     config: ConfigOpt = None,
@@ -499,16 +531,30 @@ def eval_labels(
 def ui(
     config: ConfigOpt = None,
     host: Annotated[
-        str, typer.Option(help="Interface to bind. Keep it on loopback.")
+        str,
+        typer.Option(
+            help="Interface to bind. Anything but loopback (e.g. 0.0.0.0 on a server) "
+            "requires a password."
+        ),
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Port; 0 picks a free one.")] = 8731,
     open_browser: Annotated[
         bool, typer.Option("--open/--no-open", help="Open the page in a browser.")
     ] = True,
+    password_file: Annotated[
+        Path | None,
+        typer.Option(
+            help="File holding the login password. Without it, the TENNIS_UI_PASSWORD "
+            "environment variable is used; with neither, there is no login.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", help="Log every HTTP request.")] = False,
 ) -> None:
     """Serve the browser UI: drop a video to analyse it, and run any command from a form."""
     from tennis.web import serve
+    from tennis.web.auth import read_password
 
     cfg = load_config(config)
     config_path = config if config is not None else _default_config_path()
@@ -520,6 +566,7 @@ def ui(
         port=port,
         open_browser=open_browser,
         verbose=verbose,
+        password=read_password(password_file),
     )
 
 

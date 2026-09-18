@@ -17,6 +17,7 @@ from tennis.session import (
     default_session_id,
     list_sessions,
     open_session,
+    relink_missing_sources,
     validate_session_id,
 )
 
@@ -231,3 +232,58 @@ def test_a_cloud_placeholder_fails_fast_instead_of_stalling(
     assert is_dataless(video) is True
     with pytest.raises(UserError, match="not on this disk"):
         check_video_file(video)
+
+
+def test_an_uploaded_video_is_linked_relatively_so_the_data_folder_can_move(
+    tmp_path: Path, data_root: Path
+) -> None:
+    video = data_root / "uploads" / "a.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"not really a video")
+    session = create_or_reuse_session(data_root, video, EVENING_UTC)
+    link = session.dir / "source.mp4"
+    assert os.readlink(link) == "../../uploads/a.mp4"
+
+    moved = tmp_path / "elsewhere"
+    data_root.rename(moved)
+    assert (moved / "sessions" / session.id / "source.mp4").resolve() == (
+        moved / "uploads" / "a.mp4"
+    ).resolve()
+
+
+def test_relink_points_sessions_at_a_moved_video(tmp_path: Path, data_root: Path) -> None:
+    video = _video(tmp_path, "match.mp4")
+    session = create_or_reuse_session(data_root, video, EVENING_UTC)
+    st = video.stat()
+    session.write_stamp("ingest", "h", inputs={"@source": [st.st_mtime_ns, st.st_size]})
+
+    uploads = data_root / "uploads"
+    uploads.mkdir()
+    copy = uploads / "match.mp4"
+    copy.write_bytes(video.read_bytes())
+    os.utime(copy, ns=(st.st_atime_ns, st.st_mtime_ns))  # as rsync -t would
+    video.unlink()
+
+    dry = relink_missing_sources(data_root, [uploads], dry_run=True)
+    assert [(r.session, r.found, r.same_file) for r in dry] == [(session.id, copy.resolve(), True)]
+    assert not session.source_link.exists()
+
+    relink_missing_sources(data_root, [uploads])
+    assert session.source_target() == copy.resolve()
+    assert os.readlink(session.source_link) == "../../uploads/match.mp4"
+    assert relink_missing_sources(data_root, [uploads]) == []
+
+
+def test_relink_skips_a_same_named_file_of_another_size(tmp_path: Path, data_root: Path) -> None:
+    video = _video(tmp_path, "match.mp4")
+    session = create_or_reuse_session(data_root, video, EVENING_UTC)
+    st = video.stat()
+    session.write_stamp("ingest", "h", inputs={"@source": [st.st_mtime_ns, st.st_size]})
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "match.mp4").write_bytes(b"a different video altogether")
+    video.unlink()
+
+    [result] = relink_missing_sources(data_root, [other])
+    assert result.found is None
+    assert not session.source_link.exists()

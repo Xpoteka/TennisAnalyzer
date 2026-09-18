@@ -26,12 +26,12 @@
     </div>
 
     <details class="panel" id="path-panel">
-      <summary>Already on this machine? Use the file in place (no copy)</summary>
+      <summary>Already on the server? Use the file in place (no upload)</summary>
       <div class="row">
-        <input type="text" id="path-input" class="grow" placeholder="/Users/you/Movies/session.mp4">
+        <input type="text" id="path-input" class="grow" placeholder="/mnt/tank/videos/session.mp4">
         <button class="primary" id="path-go">Analyse</button>
       </div>
-      <p class="hint">The pipeline never copies or changes your raw video — a session only holds a symlink to it. Dropping a file above uploads a copy into <code id="uploads-dir"></code>; giving a path avoids that.</p>
+      <p class="hint">The pipeline never changes your raw video — a session only holds a link to it. Dropping a file above uploads it into <code id="uploads-dir"></code>, where it is kept (see Videos); a big upload that is cut short resumes when you drop the same file again. Giving the path of a file already on the server skips the upload.</p>
     </details>
 
     <details class="panel" id="process-opts">
@@ -43,6 +43,11 @@
       <h2>What happens</h2>
       <ol class="stages" id="stage-list"></ol>
     </div>
+  </section>
+
+  <!-- Videos -->
+  <section class="view" id="view-videos">
+    <div id="video-library"><p class="empty">Loading…</p></div>
   </section>
 
   <!-- Sessions -->
