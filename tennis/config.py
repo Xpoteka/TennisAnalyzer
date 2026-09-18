@@ -1,7 +1,8 @@
-"""YAML configuration, validated with pydantic (spec section 8).
+"""YAML configuration, validated with pydantic.
 
 Every option has a default, so an empty or missing config file is valid. Unknown keys are
-rejected so that typos fail loudly instead of being silently ignored.
+rejected so that typos fail loudly instead of being silently ignored. Each pipeline stage
+declares the config keys it uses; changing one of them reruns that stage and nothing else.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from tennis.errors import ConfigError
 
@@ -23,24 +24,23 @@ class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class PlayerConfig(_Section):
-    handedness: Literal["auto", "right", "left"] = "auto"
-    # Which tracked player is you: auto (louder hits on the clip-on mic, else near_at_start),
-    # near_at_start, or A / B as shown by `tennis players` (A = near player at the start).
-    identity: Literal["auto", "near_at_start", "A", "B"] = "auto"
-    identity_loudness_db: float = Field(4.0, ge=0)
-    min_side_duration_s: float = Field(60.0, ge=0)
-    camera_side: Literal["behind_baseline", "side_on"] = "behind_baseline"
-    forward_sign: Literal[1, -1] = 1
-
-
 class PathsConfig(_Section):
     data_root: Path = Path("./data")
-    # Hand-made labels: manual_<session>.csv for stage 7, plus the validation label files.
     labels_dir: Path = Path("./labels")
 
 
+class ProxyConfig(_Section):
+    """The browser-playable copy of each video (H.264, AAC, fast start)."""
+
+    height: int = Field(720, ge=144)
+    crf: int = Field(26, ge=10, le=40)
+    # auto: Apple's hardware encoder on macOS, libx264 elsewhere.
+    encoder: Literal["auto", "libx264", "h264_videotoolbox"] = "auto"
+
+
 class AudioConfig(_Section):
+    """Ball-impact onset detection (tennis.util.audio)."""
+
     highpass_hz: float = Field(800.0, gt=0)
     highpass_order: int = Field(4, ge=1, le=10)
     onset_k: float = Field(6.0, gt=0)
@@ -48,179 +48,45 @@ class AudioConfig(_Section):
     threshold_window_s: float = Field(5.0, gt=0)
     amplitude_window_s: float = Field(0.02, gt=0)
     min_prominence_db: float = Field(6.0, ge=0)
-    own_hit_db_threshold: float = 6.0
-    # Tuned on the 2025-01-10 Wingfield match (spec: 0.15 s, no speed threshold).
-    wrist_confirm_window_s: float = Field(0.2, gt=0)
-    wrist_confirm_min_speed: float = Field(6.0, ge=0)
-    wrist_confirm_wrist: Literal["either", "racket"] = "either"
 
 
 class PoseConfig(_Section):
     backend: str = Field("yolo", min_length=1)  # checked against the backend registry
     model: str = "yolo11m-pose.pt"
+    # Person detector for small far players (their pose comes from an enlarged crop).
+    detector_model: str = "yolo11s.pt"
     device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     batch_size: int = Field(16, ge=1)
     imgsz: int = Field(640, ge=32)
-    min_person_conf: float = Field(0.25, ge=0, le=1)
+    min_person_conf: float = Field(0.2, ge=0, le=1)
     kp_conf_min: float = Field(0.3, ge=0, le=1)
-    contacts: Literal["self_audio", "all"] = "self_audio"
-    near_court_min_y: float = Field(0.4, ge=0, le=1)
-    track_iou_min: float = Field(0.3, ge=0, le=1)
-    crop_refine: Literal["auto", "always", "never"] = "auto"
-    crop_pad: float = Field(0.2, ge=0)
-    seek_gap_s: float = Field(3.0, ge=0)
-    hwaccel: str | None = None
-    track_far: bool = True
-    far_crop: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 0.5)
-    far_imgsz: int = Field(960, ge=32)
-
-    @model_validator(mode="after")
-    def _check_far_crop(self) -> PoseConfig:
-        x1, y1, x2, y2 = self.far_crop
-        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            raise ValueError(
-                "pose.far_crop must be [x1, y1, x2, y2] fractions with x1 < x2, y1 < y2"
-            )
-        return self
+    # Frames per second analysed for tracking people over the whole video.
+    sample_fps: float = Field(10.0, gt=0)
 
 
-class WindowsConfig(_Section):
-    pre_s: float = Field(1.0, gt=0)
-    post_s: float = Field(0.5, gt=0)
+class CourtConfig(_Section):
+    frames: int = Field(24, ge=1)  # frames sampled across the video for calibration
+    min_quality: float = Field(0.6, ge=0, le=1)  # below this, no court: ball stats are skipped
+    # Manual corners, as fractions of the frame, in the order far-left, far-right,
+    # near-right, near-left (doubles court). Overrides detection for every video when set.
+    manual_corners: list[tuple[float, float]] | None = None
 
 
-class OneEuroConfig(_Section):
-    # Tuned on the 2025-01-10 Wingfield match (spec: 1.0 and 0.05, which flatten swings).
-    min_cutoff: float = Field(3.0, gt=0)
-    beta: float = Field(0.5, ge=0)
-    d_cutoff: float = Field(1.0, gt=0)
-    zero_phase: bool = True
-
-
-class SavgolConfig(_Section):
-    window: int = Field(9, ge=3)
-    order: int = Field(3, ge=1)
-
-    @model_validator(mode="after")
-    def _check_window(self) -> SavgolConfig:
-        if self.window % 2 == 0:
-            raise ValueError("savgol.window must be odd")
-        if self.order >= self.window:
-            raise ValueError("savgol.order must be smaller than savgol.window")
-        return self
-
-
-class QcConfig(_Section):
-    min_valid_frame_ratio: float = Field(0.8, ge=0, le=1)
-    max_track_resets: int = Field(2, ge=0)
-
-
-class CleaningConfig(_Section):
-    smoother: Literal["one_euro", "savgol"] = "one_euro"
-    one_euro: OneEuroConfig = OneEuroConfig()
-    savgol: SavgolConfig = SavgolConfig()
-    max_gap_frames: int = Field(5, ge=0)
-    swap_improvement_ratio: float = Field(0.3, ge=0, lt=1)
-    qc: QcConfig = QcConfig()
-
-
-class ClassifyConfig(_Section):
-    classifier: str = Field("rule", min_length=1)  # checked against the classifier registry
-    serve_wrist_above_nose: float = 0.3
-    volley_travel_max: float = Field(0.8, gt=0)
-    volley_bbox_bottom_max_y: float = Field(0.55, ge=0, le=1)
-    two_handed_max_dist: float = Field(0.25, gt=0)
-
-
-class MetricsConfig(_Section):
-    outlier_metrics: list[str] = Field(
-        default_factory=lambda: [
-            "contact_height",
-            "contact_forward",
-            "elbow_angle_contact",
-            "knee_flex_min",
-            "peak_speed_offset",
-        ]
-    )
-    outlier_percentile: float = Field(95.0, gt=0, lt=100)
-    # Shoulder width this fraction of its width 1 s before contact counts as turned.
-    unit_turn_ratio: float = Field(0.85, gt=0, le=1)
-    # Ridge added to the covariance before inversion, as a fraction of its mean variance.
-    outlier_ridge: float = Field(1e-6, ge=0)
-    # Below this many swings of a stroke type, standardized Euclidean distance is used.
-    min_swings_for_covariance: int = Field(10, ge=2)
-
-
-class ClipsConfig(_Section):
-    pre_s: float = Field(1.2, gt=0)
-    post_s: float = Field(0.8, gt=0)
-    height: int = Field(720, ge=144)
-    slow_motion: bool = False
-    slow_motion_rate: float = Field(0.25, gt=0, le=1)
-    max_per_label: int = Field(10, ge=0)
-
-
-class ReportConfig(_Section):
-    trend_metrics: list[str] = Field(
-        default_factory=lambda: [
-            "contact_height",
-            "contact_forward",
-            "knee_flex_min",
-            "unit_turn_lead_time",
-        ]
-    )
-    rolling_sessions: int = Field(5, ge=1)
-    # Which way is an improvement, per metric: "up" or "down". Metrics left out here get a
-    # delta without a colour, because only the player can say what "better" means for them
-    # (spec section 14, open question).
-    metric_direction: dict[str, Literal["up", "down"]] = Field(default_factory=dict)
-
-
-def _default_vocabulary() -> dict[str, list[str]]:
-    return {
-        "good": ["good", "nice", "yes"],
-        "late": ["late"],
-        "early": ["early"],
-        "framed": ["frame", "framed", "shank"],
-        "net": ["net"],
-        "long": ["long", "out"],
-    }
-
-
-class LabelsConfig(_Section):
-    enabled: bool = True
-    backend: str = Field("faster_whisper", min_length=1)  # checked against the registry
-    whisper_model: str = "small"
-    device: Literal["auto", "cuda", "cpu"] = "auto"
-    compute_type: str = "default"
-    language: str = "en"
-    max_delay_s: float = Field(3.0, gt=0)
-    vocabulary: dict[str, list[str]] = Field(default_factory=_default_vocabulary)
-
-    @model_validator(mode="after")
-    def _check_vocabulary(self) -> LabelsConfig:
-        seen: dict[str, str] = {}
-        for label, words in self.vocabulary.items():
-            for word in words:
-                key = word.lower()
-                if key in seen and seen[key] != label:
-                    raise ValueError(f"word '{word}' is mapped to both '{seen[key]}' and '{label}'")
-                seen[key] = label
-        return self
+class BallConfig(_Section):
+    detector: Literal["motion", "motion+yolo"] = "motion"
+    yolo_model: str = "yolo11m.pt"
+    min_area_px: float = Field(2.0, ge=0)
+    max_area_frac: float = Field(0.0015, gt=0)  # of the frame area
+    max_gap_frames: int = Field(4, ge=0)
 
 
 class Config(_Section):
-    player: PlayerConfig = PlayerConfig()
     paths: PathsConfig = PathsConfig()
+    proxy: ProxyConfig = ProxyConfig()
     audio: AudioConfig = AudioConfig()
     pose: PoseConfig = PoseConfig()
-    windows: WindowsConfig = WindowsConfig()
-    cleaning: CleaningConfig = CleaningConfig()
-    classify: ClassifyConfig = ClassifyConfig()
-    metrics: MetricsConfig = MetricsConfig()
-    clips: ClipsConfig = ClipsConfig()
-    report: ReportConfig = ReportConfig()
-    labels: LabelsConfig = LabelsConfig()
+    court: CourtConfig = CourtConfig()
+    ball: BallConfig = BallConfig()
 
     def section_hash(self, *keys: str) -> str:
         """Stable hash of config values, used for stage caching.

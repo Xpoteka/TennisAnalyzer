@@ -44,27 +44,25 @@ def test_missing_file_is_config_error(tmp_path: Path) -> None:
 
 
 def test_default_file_in_cwd_is_used(tmp_path: Path) -> None:
-    (tmp_path / "config.yaml").write_text("player:\n  handedness: left\n")
-    assert load_config(None, cwd=tmp_path).player.handedness == "left"
+    (tmp_path / "config.yaml").write_text("pose:\n  device: cpu\n")
+    assert load_config(None, cwd=tmp_path).pose.device == "cpu"
 
 
 def test_empty_file_gives_defaults(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text("")
-    assert load_config(p).player.handedness == "auto"
+    assert load_config(p) == Config(paths=load_config(p).paths)
 
 
 @pytest.mark.parametrize(
     ("yaml_text", "fragment"),
     [
-        ("player:\n  handedness: both\n", "player.handedness"),
+        ("pose:\n  device: tpu\n", "pose.device"),
         ("audio:\n  highpass_hz: -1\n", "audio.highpass_hz"),
         ("audoi:\n  highpass_hz: 1\n", "audoi"),
-        ("cleaning:\n  savgol: {window: 8}\n", "odd"),
-        ("labels:\n  vocabulary: {good: [nice], bad: [nice]}\n", "mapped to both"),
-        ("labels:\n  vocabulary: {good: [yes]}\n", "labels.vocabulary.good"),
+        ("court:\n  min_quality: 2\n", "court.min_quality"),
         ("- a\n- b\n", "mapping"),
-        ("player: [\n", "invalid YAML"),
+        ("pose: [\n", "invalid YAML"),
     ],
 )
 def test_invalid_configs(tmp_path: Path, yaml_text: str, fragment: str) -> None:
@@ -89,7 +87,7 @@ def test_section_hash_only_depends_on_named_sections() -> None:
     assert base.section_hash() == other.section_hash()
     # Field-level keys only depend on that field.
     k9 = Config.model_validate({"audio": {"onset_k": 9}})
-    other_audio = Config.model_validate({"audio": {"wrist_confirm_min_speed": 9}})
+    other_audio = Config.model_validate({"audio": {"min_prominence_db": 9}})
     assert base.section_hash("audio.onset_k") != k9.section_hash("audio.onset_k")
     assert base.section_hash("audio.onset_k") == other_audio.section_hash("audio.onset_k")
     assert base.section_hash("audio") != other_audio.section_hash("audio")

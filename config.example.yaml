@@ -1,128 +1,52 @@
-# Tennis Technique Analyzer configuration.
-# Copy to config.yaml (picked up automatically from the working directory) or pass --config.
-# Every key is optional; the values below are the defaults. Unknown keys are rejected.
-# Changing a section only reruns the stages that depend on it.
-
-player:
-  handedness: auto           # auto | right | left. auto: from your own near-side hits.
-  identity: auto             # Which tracked player is you. auto: the one whose hits are clearly
-                             # louder on the clip-on mic, else near_at_start. A | B: as shown by
-                             # `tennis players` (A = the near player at the start).
-  identity_loudness_db: 4.0  # How much louder your hits must be for auto to trust the audio.
-  min_side_duration_s: 60    # Shorter stretches on one side are treated as identity mix-ups.
-  camera_side: behind_baseline   # behind_baseline | side_on
-  forward_sign: +1           # +1 | -1. Flips contact_forward if the camera setup is mirrored.
+# Tennis Analyzer configuration. Every key is optional; the values below are the defaults.
+# Copy to config.yaml and change what you need. Unknown keys are an error.
+# Changing a stage's keys reruns that stage (and only that stage) on the next analysis.
 
 paths:
-  data_root: ./data          # Sessions live in <data_root>/sessions/<id>/.
-                             # A relative path is resolved against this file's directory.
-  labels_dir: ./labels       # Hand-made labels: manual_<session>.csv for stage 7, and the
-                             # label files the eval tools read.
+  # Database, uploaded videos, results and downloaded models. Relative to this file.
+  data_root: ./data
+  # Hand-made label files used by the evaluation tools.
+  labels_dir: ./labels
 
-audio:                       # Stage 2: contact detection
-  highpass_hz: 800           # High-pass Butterworth cutoff before onset detection (Hz).
-  highpass_order: 4          # Butterworth filter order.
-  onset_k: 6.0               # Peak threshold = median + k * MAD of the onset envelope.
-  threshold_window_s: 5.0    # Sliding window for the adaptive threshold (s).
-  min_separation_s: 0.25     # Minimum time between two contacts (s).
-  amplitude_window_s: 0.02   # Half-width of the window for peak RMS amplitude (s).
-  min_prominence_db: 6.0     # Onsets must be this much louder than the local background
-                             # (drops noise flickers; not in the spec).
-  own_hit_db_threshold: 6.0  # A contact is "self" if this many dB above the session median.
-  wrist_confirm_window_s: 0.2    # Stage 4: the wrist speed must peak this close to the
-                                 # onset (s) to confirm an own hit (spec: 0.15),
-  wrist_confirm_min_speed: 6.0   # and reach this speed (torso lengths per second).
-  wrist_confirm_wrist: either    # either: the faster wrist (left/right labels are unreliable
-                                 # from behind); racket: the dominant wrist only (the spec).
+proxy:
+  # The browser-playable copy of each video: its height in pixels, and its quality
+  # (lower CRF = better and bigger). Sources browsers can already play are linked instead.
+  height: 720
+  crf: 26
+  # auto: Apple's hardware encoder on macOS, libx264 elsewhere.
+  encoder: auto
 
-pose:                        # Stage 3: pose extraction
-  backend: yolo              # Registered pose backend (yolo is built in).
-  model: yolo11m-pose.pt     # Weights. A bare name lives in <data_root>/models/ and is
-                             # downloaded there on first use.
-  device: auto               # auto | cuda | mps | cpu. auto: CUDA, then Apple GPU, then CPU.
-  batch_size: 16             # Frames per inference batch.
-  imgsz: 640                 # Model input size (long side, pixels).
-  min_person_conf: 0.25      # Person detections below this confidence are ignored.
-  kp_conf_min: 0.3           # Keypoints below this confidence are dropped (set to NaN) in stage 4.
-  contacts: self_audio       # self_audio: windows around first-pass own hits only.
-                             # all: around every onset (e.g. when the mic is not on the player).
-  near_court_min_y: 0.4      # Player's box bottom must be below this image-height fraction
-                             # (0.4 = the lower 60% of the image).
-  track_iou_min: 0.3         # Below this IoU with the previous box, the track resets.
-  crop_refine: auto          # Re-run pose on a crop around the player at full resolution.
-                             # auto: when the frame is over 2.5x the model input size.
-  crop_pad: 0.2              # Padding around the player box for that crop.
-  seek_gap_s: 3.0            # Windows closer than this are decoded in one pass instead of seeking.
-  hwaccel: null              # ffmpeg -hwaccel value for decoding, e.g. videotoolbox or cuda.
-  track_far: true            # Also track the far-side player (to tell who hit, and to follow
-                             # you when you change ends). Costs a second inference per frame.
-  far_crop: [0.0, 0.0, 1.0, 0.5]     # Frame region (fractions) searched again for the small
-                                     # far-side player,
-  far_imgsz: 960                     # at this model input size.
+audio:
+  # Ball-impact detection in the soundtrack.
+  highpass_hz: 800.0
+  highpass_order: 4
+  onset_k: 6.0                # threshold = median + k * MAD of the onset envelope
+  min_separation_s: 0.25
+  threshold_window_s: 5.0
+  amplitude_window_s: 0.02
+  min_prominence_db: 6.0      # drop onsets this close to the background level
 
-windows:                     # Frames analysed around each contact
-  pre_s: 1.0                 # Seconds before contact.
-  post_s: 0.5                # Seconds after contact.
+pose:
+  backend: yolo
+  model: yolo11m-pose.pt      # downloaded into <data_root>/models on first use
+  detector_model: yolo11s.pt  # finds small far players; their pose comes from a zoomed crop
+  device: auto                # auto | cuda | mps | cpu
+  batch_size: 16
+  imgsz: 640
+  min_person_conf: 0.2
+  kp_conf_min: 0.3
+  sample_fps: 10.0            # frames per second analysed to track people
 
-cleaning:                    # Stage 4: cleaning and normalization
-  smoother: one_euro         # one_euro | savgol
-  one_euro:
-    min_cutoff: 3.0          # Lower = smoother at low speed, more lag (spec: 1.0).
-    beta: 0.5                # Higher = less lag at high speed, per torso length/s (spec: 0.05).
-    d_cutoff: 1.0            # Cutoff for the derivative estimate.
-    zero_phase: true         # Average a forward and a backward pass to cancel the lag
-                             # (offline analysis; not in the spec).
-  savgol:
-    window: 9                # Odd number of frames.
-    order: 3                 # Polynomial order, smaller than window.
-  max_gap_frames: 5          # NaN gaps up to this length are interpolated.
-  swap_improvement_ratio: 0.3    # Swap left/right if it cuts displacement by more than this.
-  qc:
-    min_valid_frame_ratio: 0.8   # Swings with fewer valid frames fail QC.
-    max_track_resets: 2          # Swings with more player-track resets fail QC.
+court:
+  frames: 24                  # frames sampled across each video to find the court
+  min_quality: 0.6            # below this the court counts as not found: no ball stats
+  # Court corners by hand, as fractions of the frame, when detection fails:
+  # [[x, y] far-left, far-right, near-right, near-left] of the doubles court.
+  manual_corners: null
 
-classify:                    # Stage 5: stroke classification (normalized units)
-  classifier: rule               # Registered classifier (rule is built in).
-  serve_wrist_above_nose: 0.3    # Racket wrist this far above the nose at contact = serve.
-  volley_travel_max: 0.8         # Max pre-contact racket wrist travel for a volley.
-  volley_bbox_bottom_max_y: 0.55 # Player box bottom above this image-height fraction = at net.
-  two_handed_max_dist: 0.25      # Wrists closer than this at contact = two-handed backhand.
-
-metrics:                     # Stage 6
-  outlier_metrics: [contact_height, contact_forward, elbow_angle_contact, knee_flex_min, peak_speed_offset]
-  outlier_percentile: 95     # Swings above this Mahalanobis-distance percentile are outliers.
-  unit_turn_ratio: 0.85      # Shoulders this narrow (vs 1 s before contact) count as turned.
-  outlier_ridge: 1.0e-6      # Ridge added to the covariance before inverting it.
-  min_swings_for_covariance: 10  # Fewer swings of a stroke type: standardized Euclidean instead.
-
-clips:                       # Stage 8
-  pre_s: 1.2                 # Seconds before contact.
-  post_s: 0.8                # Seconds after contact.
-  height: 720                # Output height in pixels (H.264 MP4).
-  slow_motion: false         # Also render slow-motion playback.
-  slow_motion_rate: 0.25     # Playback speed for slow motion.
-  max_per_label: 10          # Cap on clips per voice label.
-
-report:                      # Stage 9
-  trend_metrics: [contact_height, contact_forward, knee_flex_min, unit_turn_lead_time]
-  rolling_sessions: 5        # Deltas compare against the mean of this many past sessions.
-  metric_direction: {}       # Which way is an improvement, per metric: up | down. Metrics
-                             # left out are shown without a colour, because only you can say
-                             # what "better" means. For example:
-                             #   metric_direction: {contact_forward: up, knee_flex_min: down}
-
-labels:                      # Stage 7: voice labels (optional)
-  enabled: true              # Also skippable per run with --no-labels.
-  backend: faster_whisper    # Registered transcription backend.
-  whisper_model: small       # faster-whisper model size. Downloaded to <data_root>/models/whisper.
-  device: auto               # auto | cuda | cpu.
-  compute_type: default      # ctranslate2 compute type, e.g. int8, float16.
-  language: en               # Spoken language of your labels ("" to auto-detect).
-  max_delay_s: 3.0           # A label word applies to the last own contact up to this long before.
-  vocabulary:                # label: [spoken words]. A word may map to only one label.
-    good: [good, nice, "yes"]    # quoted: bare yes is a boolean in YAML 1.1
-    late: [late]
-    early: [early]
-    framed: [frame, framed, shank]
-    net: [net]
-    long: [long, out]
+ball:
+  detector: motion            # motion | motion+yolo
+  yolo_model: yolo11m.pt
+  min_area_px: 2.0
+  max_area_frac: 0.0015       # of the frame area
+  max_gap_frames: 4

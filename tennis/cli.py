@@ -1,627 +1,313 @@
-"""Command-line interface (spec section 7).
-
-Exit codes: 0 success, 1 user or config error, 2 stage failure (stage name printed).
-"""
+"""Command line: ``tennis serve`` runs the app; the other commands are for scripting and tests."""
 
 from __future__ import annotations
 
 import sys
-from datetime import date
+import threading
+import webbrowser
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 import typer
 
-from tennis import __version__
 from tennis.config import Config, load_config
 from tennis.errors import TennisError, UserError
-from tennis.session import (
-    Session,
-    check_video_file,
-    create_or_reuse_session,
-    list_sessions,
-    open_session,
-)
-from tennis.stages import STAGES, run_pipeline, stage_status
-from tennis.util import video
 from tennis.util.log import get_logger
 
-app = typer.Typer(
-    name="tennis",
-    help="Measure tennis technique from fixed-camera session videos.",
-    no_args_is_help=True,
-    add_completion=False,
-    pretty_exceptions_enable=False,
-)
+app = typer.Typer(add_completion=False, no_args_is_help=True, pretty_exceptions_enable=False)
 
 ConfigOpt = Annotated[
-    Path | None,
-    typer.Option("--config", "-c", help="Config YAML (default: ./config.yaml if present)."),
+    Path | None, typer.Option("--config", "-c", help="config.yaml (default: ./config.yaml)")
+]
+DataRootOpt = Annotated[
+    Path | None, typer.Option("--data-root", help="Override paths.data_root from the config")
 ]
 
 
-def _version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"tennis-analyzer {__version__}")
-        raise typer.Exit()
-
-
-@app.callback()
-def _root(
-    version: Annotated[
-        bool,
-        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version."),
-    ] = False,
-) -> None:
-    pass
+def _load(config: Path | None, data_root: Path | None) -> tuple[Config, Path]:
+    cfg = load_config(config)
+    root = (data_root or cfg.paths.data_root).expanduser().resolve()
+    return cfg, root
 
 
 @app.command()
-def process(
-    video_path: Annotated[Path, typer.Argument(metavar="VIDEO", help="Session video (MP4/MOV).")],
-    session_id: Annotated[
-        str | None, typer.Option("--session-id", help="Override the derived session id.")
-    ] = None,
+def serve(
     config: ConfigOpt = None,
-    force: Annotated[bool, typer.Option("--force", help="Rerun every stage.")] = False,
-    from_stage: Annotated[
-        int | None,
-        typer.Option("--from-stage", metavar="N", help="Rerun stage N and everything after it."),
-    ] = None,
-    no_labels: Annotated[
-        bool, typer.Option("--no-labels", help="Skip the voice-label stage.")
-    ] = False,
-) -> None:
-    """Process one session video end to end."""
-    cfg = load_config(config)
-    src = check_video_file(video_path)
-    created = video.probe(src).creation_time or video.file_creation_time(src)
-    session = create_or_reuse_session(cfg.paths.data_root, src, created, session_id)
-    typer.echo(f"session {session.id}  ({session.dir})", err=True)
-    ran = run_pipeline(
-        session,
-        cfg,
-        get_logger(),
-        force=force,
-        from_stage=from_stage,
-        labels_enabled=cfg.labels.enabled and not no_labels,
-    )
-    typer.echo(f"done: {', '.join(ran) if ran else 'everything up to date'}", err=True)
-
-
-@app.command("list")
-def list_cmd(config: ConfigOpt = None) -> None:
-    """List sessions and the status of each stage (ok, stale, - not run, n/a not built yet)."""
-    cfg = load_config(config)
-    sessions = list_sessions(cfg.paths.data_root)
-    if not sessions:
-        typer.echo(f"no sessions in {cfg.paths.data_root}")
-        return
-    _print_status_table(sessions, cfg)
-
-
-def _print_status_table(sessions: list[Session], cfg: Config) -> None:
-    headers = ["session", *(s.name for s in STAGES)]
-    rows = [[sess.id, *(stage_status(sess, st, cfg) for st in STAGES)] for sess in sessions]
-    widths = [max(len(r[i]) for r in [headers, *rows]) for i in range(len(headers))]
-    for row in [headers, *rows]:
-        typer.echo("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
-
-
-@app.command()
-def relink(
-    search: Annotated[
-        list[Path] | None,
-        typer.Option(
-            "--dir",
-            help="Folder to look in; repeatable. Default: the uploads folder in the data root.",
-        ),
-    ] = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Only say what would be relinked.")
-    ] = False,
-    config: ConfigOpt = None,
-) -> None:
-    """Repoint sessions whose raw video moved, e.g. after copying the data folder to a server."""
-    from tennis.session import relink_missing_sources
-
-    cfg = load_config(config)
-    dirs = search or [cfg.paths.data_root / "uploads"]
-    results = relink_missing_sources(cfg.paths.data_root, dirs, dry_run=dry_run)
-    if not results:
-        typer.echo("every session's video is where its link says")
-        return
-    for r in results:
-        if r.found is None:
-            typer.echo(f"{r.session}: {Path(r.missing).name} not found (was {r.missing})")
-            continue
-        verb = "would link" if dry_run else "linked"
-        note = "" if r.same_file else "  (different modification time: its stages will rerun)"
-        typer.echo(f"{r.session}: {verb} {r.found}{note}")
-
-
-@app.command()
-def report(
-    session_id: str,
-    config: ConfigOpt = None,
-    no_clips: Annotated[
-        bool, typer.Option("--no-clips", help="Rebuild only the HTML, keeping the clips.")
-    ] = False,
-) -> None:
-    """Rebuild the clips and the report for one session (stages 8 and 9)."""
-    from tennis.stages import STAGES_BY_NAME, StageContext, check_inputs
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    names = ["report"] if no_clips else ["clips", "report"]
-    for name in names:
-        stage = STAGES_BY_NAME[name]
-        check_inputs(session, stage)
-        chash = stage.config_hash(cfg)
-        session.clear_stamp(name)
-        inputs = session.fingerprints(stage.all_inputs)
-        assert stage.run is not None
-        stage.run(StageContext(session, cfg, chash, get_logger(), name))
-        session.write_stamp(name, chash, inputs=inputs,
-                            outputs=session.fingerprints(stage.outputs))  # fmt: skip
-    typer.echo(f"wrote {session.path('report.html')}")
-
-
-@app.command()
-def trends(
-    since: Annotated[
-        str | None, typer.Option(help="Only sessions from this date on (YYYY-MM-DD).")
-    ] = None,
-    config: ConfigOpt = None,
-    out: Annotated[
-        Path | None, typer.Option(help="Output HTML (default: <data_root>/report.html).")
-    ] = None,
-) -> None:
-    """Build the cross-session trends report."""
-    from tennis.reporting import write_trends_report
-
-    cfg = load_config(config)
-    if since is not None:
-        try:
-            date.fromisoformat(since)
-        except ValueError as exc:
-            raise UserError(f"--since: expected YYYY-MM-DD, got {since!r}") from exc
-    typer.echo(f"wrote {write_trends_report(cfg, since=since, out=out)}")
-
-
-@app.command("pose-preview")
-def pose_preview(
-    session_id: str,
-    config: ConfigOpt = None,
-    count: Annotated[int, typer.Option(min=1, help="Swings (analysis windows) to render.")] = 20,
-    seed: Annotated[int, typer.Option(help="Random seed for the sample.")] = 0,
-    speed: Annotated[
-        float, typer.Option(min=0.05, max=4.0, help="Playback speed, e.g. 0.25 for slow motion.")
-    ] = 1.0,
-    out: Annotated[
-        Path | None, typer.Option(help="Output MP4 (default: <session>/debug/pose_preview.mp4).")
-    ] = None,
-) -> None:
-    """Render sampled swings with the tracked skeleton for review (M3 acceptance)."""
-    from tennis.review import render_pose_preview
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    path, summaries = render_pose_preview(
-        session, cfg, count=count, seed=seed, speed=speed, out=out
-    )
-    typer.echo(f"{'window':>6}  {'start_s':>8}  {'frames':>6}  {'tracked':>7}  {'resets':>6}")
-    for s in summaries:
-        typer.echo(
-            f"{s.window_id:>6}  {s.start:>8.2f}  {s.frames:>6}  "
-            f"{s.detected_ratio:>7.1%}  {s.resets:>6}"
-        )
-    frames = sum(s.frames for s in summaries)
-    detected = sum(s.detected for s in summaries)
-    ratio = detected / frames if frames else 0.0
-    typer.echo(
-        f"total: {detected}/{frames} frames with a player ({ratio:.1%}); "
-        f"M3 target is at least 95% with the skeleton on the right person (check the video)"
-    )
-    typer.echo(f"wrote {path} and {path.with_suffix('.csv').name}", err=True)
-
-
-@app.command()
-def players(
-    session_id: str,
-    config: ConfigOpt = None,
-    count: Annotated[int, typer.Option(min=1, help="Thumbnails per player.")] = 6,
-) -> None:
-    """Show who was identified as you, which side you played on, and your racket hand."""
-    from tennis.review import render_players
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    path, info = render_players(session, cfg, per_player=count)
-    hand = info.get("handedness") or {}
-    typer.echo(f"you: player {info.get('me')} ({info.get('me_reason')})")
-    typer.echo(f"racket hand: {hand.get('hand')} ({hand.get('reason')}; votes {hand.get('votes')})")
-    typer.echo(f"hits: {info.get('hits')}")
-    if not info.get("identities_resolved"):
-        typer.echo("only one player was tracked; everyone near the camera is treated as you")
-    for seg in info.get("sides") or []:
-        start, end = float(seg["start"]), float(seg["end"])
-        span = f"{int(start // 60):3d}:{start % 60:04.1f} - {int(end // 60):3d}:{end % 60:04.1f}"
-        typer.echo(f"  {span}  you are {seg['side']:4s} ({seg['windows']} windows)")
-    typer.echo(f"wrote {path}; if the wrong player is marked as you, set player.identity "
-               "to the other letter in your config")  # fmt: skip
-
-
-@app.command("swing-plots")
-def swing_plots(
-    session_id: str,
-    config: ConfigOpt = None,
-    count: Annotated[int, typer.Option(min=1, help="Swings to plot.")] = 6,
-    seed: Annotated[int, typer.Option(help="Random seed for the sample.")] = 0,
-    all_swings: Annotated[
-        bool, typer.Option("--all", help="Sample from all QC-passing swings, not just confirmed.")
-    ] = False,
-    out: Annotated[Path | None, typer.Option(help="Output HTML file.")] = None,
-) -> None:
-    """Plot raw vs cleaned wrist trajectories for sampled swings (M4 review)."""
-    from tennis.review import render_swing_plots
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    path = render_swing_plots(
-        session, cfg, count=count, seed=seed, confirmed_only=not all_swings, out=out
-    )
-    typer.echo(f"wrote {path}", err=True)
-
-
-@app.command("tune-contacts")
-def tune_contacts(
-    session_id: str,
-    labels: Annotated[Path, typer.Option(help="CSV of impact times (video time, s or m:ss.sss).")],
-    config: ConfigOpt = None,
-    target: Annotated[
-        str,
-        typer.Option(help="self: labels are your own hits. any: labels are all players' hits."),
-    ] = "self",
-    k: Annotated[str | None, typer.Option("--k", help="onset_k values, comma-separated.")] = None,
-    cutoff: Annotated[
-        str | None, typer.Option("--cutoff", help="highpass_hz values, comma-separated.")
-    ] = None,
-    db: Annotated[
-        str | None, typer.Option("--db", help="own_hit_db_threshold values, comma-separated.")
-    ] = None,
-    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
-    label_offset: Annotated[
-        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
-    ] = 0.0,
-    label_resolution: Annotated[
-        float,
-        typer.Option(help="Label precision in seconds: a label t means [t, t + this]."),
-    ] = 0.0,
-    segments: Annotated[
-        Path | None,
-        typer.Option(
-            help="CSV of start,end ranges to evaluate (e.g. rallies), on the labels' clock."
-        ),
-    ] = None,
-    start: Annotated[
-        str | None, typer.Option(help="Start of the labeled range (default: first label - 1 s).")
-    ] = None,
-    end: Annotated[
-        str | None, typer.Option(help="End of the labeled range (default: last label + 1 s).")
-    ] = None,
-    top: Annotated[int, typer.Option(help="Rows to show.")] = 15,
-    report_path: Annotated[
-        Path | None, typer.Option("--report", help="Also write the results as markdown.")
-    ] = None,
-) -> None:
-    """Grid-search contact detection parameters against labeled impacts."""
-    from tennis.stages import contacts
-    from tennis.validation import parse_time, read_segments, read_time_labels
-
-    if label_resolution < 0 or tolerance_ms < 0:
-        raise UserError("--label-resolution and --tolerance-ms must not be negative")
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    spec = contacts.LabelSpec(
-        times_s=read_time_labels(labels),
-        tolerance_s=tolerance_ms / 1000,
-        resolution_s=label_resolution,
-        offset_s=label_offset,
-    )
-
-    ranges: list[tuple[float, float]] | None = None
-    if segments is not None:
-        if start is not None or end is not None:
-            raise UserError("use either --segments or --start/--end, not both")
-        ranges = read_segments(segments)
-    elif start is not None or end is not None:
-        try:
-            lo = parse_time(start) if start is not None else 0.0
-            hi = parse_time(end) if end is not None else float("inf")
-        except ValueError as exc:
-            raise UserError(f"--start/--end: {exc}") from exc
-        ranges = [(lo, hi)]
-
-    typer.echo(
-        f"tuning on {spec.times_s.size} labels; this runs detection once per cutoff...", err=True
-    )
-    result = contacts.tune_contacts(
-        session,
-        cfg.audio,
-        spec,
-        target=target,
-        ks=_float_list(k, "k") or contacts.DEFAULT_GRID_K,
-        cutoffs=_float_list(cutoff, "cutoff") or contacts.DEFAULT_GRID_CUTOFF,
-        db_thresholds=_float_list(db, "db") or contacts.DEFAULT_GRID_DB,
-        segments=ranges,
-    )
-    typer.echo(contacts.format_tune_report(result, top=top))
-    if report_path is not None:
-        contacts.write_tune_report(result, report_path, top=top)
-        typer.echo(f"wrote {report_path}", err=True)
-
-
-def _float_list(value: str | None, name: str) -> list[float] | None:
-    if value is None:
-        return None
-    try:
-        items = [float(v) for v in value.split(",") if v.strip()]
-    except ValueError as exc:
-        raise UserError(f"--{name}: expected comma-separated numbers, got {value!r}") from exc
-    if not items:
-        raise UserError(f"--{name}: no values given")
-    return items
-
-
-@app.command("eval-contacts")
-def eval_contacts(
-    session_id: str,
-    labels: Annotated[
-        Path, typer.Option(help="CSV of your own impact times (video time, s or m:ss.sss).")
-    ],
-    config: ConfigOpt = None,
-    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
-    label_offset: Annotated[
-        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
-    ] = 0.0,
-    label_resolution: Annotated[
-        float,
-        typer.Option(help="Label precision in seconds: a label t means [t, t + this]."),
-    ] = 0.0,
-    segments: Annotated[
-        Path | None,
-        typer.Option(
-            help="CSV of start,end ranges to evaluate (e.g. rallies), on the labels' clock."
-        ),
-    ] = None,
-    speeds: Annotated[
-        str | None, typer.Option(help="wrist_confirm_min_speed values to sweep.")
-    ] = None,
-    windows: Annotated[
-        str | None, typer.Option(help="wrist_confirm_window_s values to sweep.")
-    ] = None,
-    top: Annotated[int, typer.Option(help="Sweep rows to show.")] = 12,
-    report_path: Annotated[
-        Path | None, typer.Option("--report", help="Also write the results as markdown.")
-    ] = None,
-) -> None:
-    """Score own-hit detection (audio first pass and wrist confirmation) against labels."""
-    from tennis.evaluation import (
-        DEFAULT_SPEEDS,
-        DEFAULT_WINDOWS,
-        evaluate_contacts,
-        format_contact_eval,
-        write_contact_eval,
-    )
-    from tennis.stages.clean import resolved_handedness
-    from tennis.stages.contacts import LabelSpec, make_scorer
-    from tennis.validation import read_segments, read_time_labels
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    spec = LabelSpec(
-        times_s=read_time_labels(labels),
-        tolerance_s=tolerance_ms / 1000,
-        resolution_s=label_resolution,
-        offset_s=label_offset,
-    )
-    scorer = make_scorer(session, spec, read_segments(segments) if segments else None)
-    result = evaluate_contacts(
-        session,
-        scorer,
-        (
-            cfg.audio.wrist_confirm_min_speed,
-            cfg.audio.wrist_confirm_window_s,
-            cfg.audio.wrist_confirm_wrist,
-        ),
-        resolved_handedness(session, cfg),
-        speeds=_float_list(speeds, "speeds") or DEFAULT_SPEEDS,
-        windows=_float_list(windows, "windows") or DEFAULT_WINDOWS,
-    )
-    typer.echo(format_contact_eval(result, top=top))
-    if report_path is not None:
-        write_contact_eval(result, report_path, top=top)
-        typer.echo(f"wrote {report_path}", err=True)
-
-
-@app.command("eval-classifier")
-def eval_classifier(
-    session_id: str,
-    labels: Annotated[
-        Path, typer.Option(help="CSV of labeled stroke types ('t,stroke' or 't,player,stroke').")
-    ],
-    config: ConfigOpt = None,
-    tolerance_ms: Annotated[float, typer.Option(help="Match tolerance.")] = 40.0,
-    label_offset: Annotated[
-        float, typer.Option(help="Seconds to add to every label (label clock vs video).")
-    ] = 0.0,
-    label_resolution: Annotated[
-        float, typer.Option(help="Label precision in seconds: a label t means [t, t + this].")
-    ] = 0.0,
-    segments: Annotated[
-        Path | None,
-        typer.Option(help="CSV of start,end ranges to evaluate, on the labels' clock."),
-    ] = None,
-    report_path: Annotated[
-        Path | None, typer.Option("--report", help="Also write the results as markdown.")
-    ] = None,
-) -> None:
-    """Print a confusion matrix for the stroke classifier (M5 acceptance: 90% accuracy)."""
-    import numpy as np
-
-    from tennis.evaluation import evaluate_classifier, format_classifier_eval
-    from tennis.stages.contacts import LabelSpec, make_scorer
-    from tennis.validation import read_segments, read_stroke_labels
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    pairs = read_stroke_labels(labels)
-    spec = LabelSpec(
-        times_s=np.array([t for t, _ in pairs], dtype=np.float64),
-        tolerance_s=tolerance_ms / 1000,
-        resolution_s=label_resolution,
-        offset_s=label_offset,
-    )
-    scorer = make_scorer(session, spec, read_segments(segments) if segments else None)
-    result = evaluate_classifier(session, scorer, pairs)
-    typer.echo(format_classifier_eval(result))
-    if report_path is not None:
-        from tennis.evaluation import write_classifier_eval
-
-        write_classifier_eval(result, report_path)
-        typer.echo(f"wrote {report_path}", err=True)
-
-
-@app.command("eval-labels")
-def eval_labels(
-    session_id: str,
-    labels: Annotated[
-        Path, typer.Option(help="CSV of the label words you actually said ('t,label').")
-    ],
-    config: ConfigOpt = None,
-    tolerance_s: Annotated[
-        float, typer.Option(help="How far a stored label may sit from the spoken word.")
-    ] = 2.0,
-    report_path: Annotated[
-        Path | None, typer.Option("--report", help="Also write the results as markdown.")
-    ] = None,
-) -> None:
-    """Score the voice labels against what was said (M8 acceptance: 80% matched)."""
-    from tennis.evaluation import evaluate_labels, format_label_eval
-    from tennis.util.io import read_json
-    from tennis.validation import read_word_labels
-
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    meta_path = session.path("metadata.json")
-    video_start = float(read_json(meta_path).get("video_start_s", 0.0)) if meta_path.exists() else 0
-    result = evaluate_labels(
-        session, read_word_labels(labels), tolerance_s=tolerance_s, video_start_s=video_start
-    )
-    typer.echo(format_label_eval(result))
-    if report_path is not None:
-        from tennis.evaluation import write_label_eval
-
-        write_label_eval(result, report_path)
-        typer.echo(f"wrote {report_path}", err=True)
-
-
-@app.command()
-def ui(
-    config: ConfigOpt = None,
-    host: Annotated[
-        str,
-        typer.Option(
-            help="Interface to bind. Anything but loopback (e.g. 0.0.0.0 on a server) "
-            "requires a password."
-        ),
-    ] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Port; 0 picks a free one.")] = 8731,
-    open_browser: Annotated[
-        bool, typer.Option("--open/--no-open", help="Open the page in a browser.")
-    ] = True,
+    data_root: DataRootOpt = None,
+    host: Annotated[str, typer.Option(help="Interface to listen on")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port")] = 8731,
     password_file: Annotated[
-        Path | None,
-        typer.Option(
-            help="File holding the login password. Without it, the TENNIS_UI_PASSWORD "
-            "environment variable is used; with neither, there is no login.",
-            exists=True,
-            dir_okay=False,
-        ),
+        Path | None, typer.Option(help="File holding the login password")
     ] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", help="Log every HTTP request.")] = False,
+    secure_cookie: Annotated[bool, typer.Option(help="Behind HTTPS: mark cookies Secure")] = False,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open")] = True,
 ) -> None:
-    """Serve the browser UI: drop a video to analyse it, and run any command from a form."""
-    from tennis.web import serve
-    from tennis.web.auth import read_password
+    """Run the web app and the analysis worker."""
+    import ipaddress
 
-    cfg = load_config(config)
-    config_path = config if config is not None else _default_config_path()
-    serve(
-        cfg,
-        config_path,
-        Path.cwd(),
-        host=host,
-        port=port,
-        open_browser=open_browser,
-        verbose=verbose,
-        password=read_password(password_file),
+    import uvicorn
+
+    from tennis.api import auth
+    from tennis.api.app import create_app
+
+    _cfg, root = _load(config, data_root)
+    password = auth.read_password(password_file)
+    loopback = host == "localhost" or _is_loopback(host, ipaddress)
+    if not loopback and password is None:
+        raise UserError(
+            f"listening on {host} needs a password: set {auth.PASSWORD_ENV} or --password-file"
+        )
+    if password is not None and len(password) < auth.MIN_PASSWORD_LENGTH:
+        raise UserError(f"the password needs at least {auth.MIN_PASSWORD_LENGTH} characters")
+    logger = get_logger()
+    application = create_app(
+        root,
+        config_path=config.resolve() if config else None,
+        password=password,
+        secure_cookie=secure_cookie,
+        logger=logger,
     )
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/"
+    print(f"tennis  {url}   (data {root}, {'password' if password else 'no password'})")
+    if open_browser and loopback:
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    uvicorn.run(application, host=host, port=port, log_level="warning")
 
 
-def _default_config_path() -> Path | None:
-    from tennis.config import DEFAULT_CONFIG_NAME
-
-    path = Path.cwd() / DEFAULT_CONFIG_NAME
-    return path if path.is_file() else None
+def _is_loopback(host: str, ipaddress: object) -> bool:
+    try:
+        return bool(ipaddress.ip_address(host).is_loopback)  # type: ignore[attr-defined]
+    except ValueError:
+        return False
 
 
 @app.command()
-def inspect(
-    session_id: str,
-    swing_id: int,
+def analyze(
+    videos: Annotated[list[Path], typer.Argument(help="Video files of one session")],
     config: ConfigOpt = None,
-    open_clip: Annotated[
-        bool, typer.Option("--open/--no-open", help="Open the swing's clip in a player.")
-    ] = True,
+    data_root: DataRootOpt = None,
+    session: Annotated[int | None, typer.Option(help="Add to this session ID")] = None,
+    force: Annotated[bool, typer.Option(help="Rerun every stage")] = False,
 ) -> None:
-    """Print a swing's metrics and open its clip."""
-    from tennis.review import format_swing_inspection, open_file
+    """Analyse videos now, in this terminal, without the web app."""
+    from sqlmodel import select
 
-    cfg = load_config(config)
-    session = open_session(cfg.paths.data_root, session_id)
-    text, clip = format_swing_inspection(session, cfg, swing_id)
-    typer.echo(text)
-    if clip is None:
-        typer.echo("no clip for this swing; run 'tennis report' to render one", err=True)
-    elif open_clip:
-        open_file(clip)
-        typer.echo(f"opened {clip}", err=True)
-    else:
-        typer.echo(f"clip: {clip}", err=True)
+    from tennis.db import session_scope
+    from tennis.db.models import Session, Video
+    from tennis.pipeline import store_video_path
+    from tennis.pipeline.runner import analyze_session
 
-
-def main(argv: list[str] | None = None) -> NoReturn:
-    """Entry point. Maps every error to the spec's exit codes (click would use 2 for usage)."""
-    try:
-        rv = app(args=argv, prog_name="tennis", standalone_mode=False)
-    except TennisError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        sys.exit(exc.exit_code)
-    except typer.TyperException as exc:  # usage errors: bad option, missing argument, ...
-        show = getattr(exc, "show", None)
-        if callable(show):
-            show()
+    cfg, root = _load(config, data_root)
+    paths = [v.expanduser().resolve() for v in videos]
+    for p in paths:
+        if not p.is_file():
+            raise UserError(f"no such file: {p}")
+    with session_scope(root) as db:
+        if session is None:
+            row = Session()
+            db.add(row)
+            db.flush()
         else:
-            typer.echo(f"error: {exc}", err=True)
-        sys.exit(1)
-    except typer.Abort:
-        typer.echo("aborted", err=True)
-        sys.exit(1)
-    # In non-standalone mode typer returns the code of an explicit exit (e.g. --help).
-    sys.exit(rv if isinstance(rv, int) else 0)
+            found = db.get(Session, session)
+            if found is None:
+                raise UserError(f"no session {session}")
+            row = found
+        assert row.id is not None
+        session_id = row.id
+        known = {v.path for v in db.exec(select(Video).where(Video.session_id == session_id))}
+        for p in paths:
+            if store_video_path(root, p) not in known:
+                db.add(
+                    Video(
+                        session_id=session_id,
+                        filename=p.name,
+                        path=store_video_path(root, p),
+                        size_bytes=p.stat().st_size,
+                    )
+                )
+
+    def progress(fraction: float, stage: str, message: str | None) -> None:
+        print(f"\r{fraction * 100:5.1f}%  {stage}".ljust(70), end="", file=sys.stderr, flush=True)
+
+    analyze_session(root, cfg, session_id, get_logger(), force=force, on_progress=progress)
+    print(file=sys.stderr)
+    print(f"session {session_id} ready")
 
 
-if __name__ == "__main__":
-    main()
+@app.command()
+def review(
+    video_id: int,
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    start: Annotated[float, typer.Option(help="Seconds from the start of the video")] = 0.0,
+    duration: Annotated[float, typer.Option(help="Seconds to render")] = 30.0,
+) -> None:
+    """Draw the court, players, ball and sound onsets over part of a video."""
+    from tennis.db import session_scope
+    from tennis.db.models import Video
+    from tennis.pipeline import video_source
+    from tennis.review import render
+
+    _cfg, root = _load(config, data_root)
+    with session_scope(root) as db:
+        row = db.get(Video, video_id)
+        if row is None:
+            raise UserError(f"no video {video_id}")
+        source = video_source(root, row.path)
+    print(render(root, video_id, source, start, duration))
+
+
+@app.command("eval-hits")
+def eval_hits(
+    video_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with a t column (and optionally player)")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to video time, seconds")] = 0.0,
+    resolution: Annotated[float, typer.Option(help="Label time resolution, seconds")] = 0.0,
+    verbose: Annotated[bool, typer.Option(help="List misses and extra detections")] = False,
+) -> None:
+    """Compare a video's detected hits with hand-made labels."""
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from tennis.evaluation import evaluate_hits, parse_time, read_labels
+    from tennis.pipeline import video_dir
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    if not rows:
+        raise UserError(f"{labels} has no labels")
+    key = "t" if "t" in rows[0] else next(iter(rows[0]))
+    label_t = np.array([parse_time(r[key]) for r in rows])
+    hits = pq.read_table(video_dir(root, video_id) / "hits.parquet").to_pydict()
+    hit_t = np.asarray(hits["t"], np.float64)
+    report, matches = evaluate_hits(hit_t, label_t, offset=offset, resolution=resolution)
+    print(report.text())
+    if verbose:
+        matched_labels = {m.label_index for m in matches}
+        for i in np.argsort(label_t):
+            if i not in matched_labels:
+                print(f"  missed label {label_t[i]:8.1f}  {rows[i]}")
+
+
+@app.command("eval-shots")
+def eval_shots(
+    session_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with t, and player and stroke columns")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to session time, seconds")] = 0.0,
+    resolution: Annotated[float, typer.Option(help="Label time resolution, seconds")] = 0.0,
+) -> None:
+    """Compare a session's shots (hitter and stroke) with hand-made labels."""
+    import numpy as np
+    from sqlmodel import col, select
+
+    from tennis.db import session_scope
+    from tennis.db.models import SessionPlayer, Shot
+    from tennis.evaluation import evaluate_shots, read_labels
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    if not rows:
+        raise UserError(f"{labels} has no labels")
+    with session_scope(root) as db:
+        shots = list(
+            db.exec(select(Shot).where(Shot.session_id == session_id).order_by(col(Shot.t)))
+        )
+        label_of = {
+            sp.player_id: sp.label
+            for sp in db.exec(select(SessionPlayer).where(SessionPlayer.session_id == session_id))
+        }
+    report = evaluate_shots(
+        np.array([s.t for s in shots]),
+        [label_of.get(s.player_id) if s.player_id else None for s in shots],
+        [s.stroke for s in shots],
+        rows,
+        offset=offset,
+        resolution=resolution,
+    )
+    print(report.text())
+
+
+@app.command("eval-points")
+def eval_points(
+    session_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with t, end, server, winner per point")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to session time, seconds")] = 0.0,
+) -> None:
+    """Compare a match's points (server and winner) with hand-made labels."""
+    from sqlmodel import col, select
+
+    from tennis.db import session_scope
+    from tennis.db.models import Rally, SessionPlayer
+    from tennis.evaluation import parse_time, read_labels
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    with session_scope(root) as db:
+        rallies = [
+            r
+            for r in db.exec(
+                select(Rally).where(Rally.session_id == session_id).order_by(col(Rally.start_s))
+            )
+            if r.score_before is not None
+        ]
+        label_of = {
+            sp.player_id: sp.label
+            for sp in db.exec(select(SessionPlayer).where(SessionPlayer.session_id == session_id))
+        }
+    used: set[int] = set()
+    pairs = []
+    for row in rows:
+        lo = parse_time(row["t"]) + offset - 1.5
+        hi = parse_time(row["end"]) + offset + 2.5
+        for r in rallies:
+            if r.id not in used and lo <= r.start_s <= hi:
+                used.add(r.id or 0)
+                pairs.append((row, r))
+                break
+    print(f"points: labelled {len(rows)}, found {len(rallies)}, matched {len(pairs)}")
+    if not pairs:
+        return
+    # Which found player is "self": the one who served most of the labelled self serves.
+    votes: dict[str, int] = {}
+    for row, r in pairs:
+        who = label_of.get(r.server_id or -1)
+        if who:
+            votes[who] = votes.get(who, 0) + (1 if row["server"] == "self" else -1)
+    me = max(votes, key=lambda k: votes[k]) if votes else None
+
+    def side(pid: int | None) -> str | None:
+        who = label_of.get(pid or -1)
+        return None if who is None else ("self" if who == me else "other")
+
+    server_ok = sum(1 for row, r in pairs if side(r.server_id) == row["server"])
+    winner_ok = sum(1 for row, r in pairs if side(r.winner_id) == row["winner"])
+    print(f"self = player {me}")
+    print(f"server right: {server_ok}/{len(pairs)} ({server_ok / len(pairs):.0%})")
+    print(f"winner right: {winner_ok}/{len(pairs)} ({winner_ok / len(pairs):.0%})")
+    for who in ("self", "other"):
+        truth = sum(1 for row in rows if row["winner"] == who)
+        found = sum(1 for r in rallies if side(r.winner_id) == who)
+        print(f"points won by {who}: labelled {truth}, found {found}")
+
+
+@app.command("run-job", hidden=True)
+def run_job(job_id: int, config: ConfigOpt = None, data_root: DataRootOpt = None) -> None:
+    """Run one queued job (the worker starts this in a subprocess)."""
+    from tennis.worker import execute_job
+
+    cfg, root = _load(config, data_root)
+    execute_job(root, cfg, job_id, get_logger())
+
+
+def main() -> None:
+    try:
+        app()
+    except TennisError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)

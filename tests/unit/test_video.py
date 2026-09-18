@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pytest
 
-from tennis.stages.ingest import frame_rate_warnings
+from tennis.pipeline.video.ingest import frame_rate_warnings
 from tennis.util.video import (
     FrameIntervals,
     VideoStream,

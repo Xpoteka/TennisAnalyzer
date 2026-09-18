@@ -32,6 +32,18 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Web UI (type check and build)
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
   # The Docker image for the server (docs/DEPLOY.md). Built after the checks pass; pushed to
   # ghcr.io/<owner>/<repo> only from main, so a pull request just proves that it builds.
   image:

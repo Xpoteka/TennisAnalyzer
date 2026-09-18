@@ -276,3 +276,23 @@ def extract_audio(src: Path, dst: Path, stream_index: int, sample_rate: int) -> 
             str(dst),
         ]
     )  # fmt: skip
+
+
+def grab_frame(path: Path, t: float) -> npt.NDArray[np.uint8] | None:
+    """One decoded frame (BGR) at about ``t`` seconds from the start, or None past the end."""
+    import cv2
+
+    exe = require_tool("ffmpeg")
+    proc = subprocess.run(
+        [
+            exe, "-nostdin", "-hide_banner", "-v", "error",
+            "-ss", f"{max(0.0, t):.3f}", "-i", str(path),
+            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-",
+        ],
+        capture_output=True,
+        check=False,
+    )  # fmt: skip
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    image = cv2.imdecode(np.frombuffer(proc.stdout, np.uint8), cv2.IMREAD_COLOR)
+    return None if image is None else np.asarray(image, np.uint8)

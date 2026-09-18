@@ -14,24 +14,6 @@ MakeVideo = Callable[..., Path]
 COUNTER_PERIOD = 110  # keeps the counter pattern's luma within 16..235
 
 
-def implemented_stages(start: str = "ingest", *, labels: bool = True) -> list[str]:
-    """Names of the stages that run today, from ``start`` on, in the order the runner uses.
-
-    The runner stops at the first unimplemented stage. Optional stages are included when
-    enabled (the labels stage is enabled by default).
-    """
-    from tennis.stages import STAGES
-
-    names: list[str] = []
-    for s in STAGES:
-        if s.optional and not labels:
-            continue
-        if not s.implemented:
-            break
-        names.append(s.name)
-    return names[names.index(start) :]
-
-
 def _ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *args], check=True)
 
@@ -126,5 +108,9 @@ def _no_real_pose_model(request: pytest.FixtureRequest) -> Iterator[None]:
 
 
 @pytest.fixture
-def data_root(tmp_path: Path) -> Path:
-    return tmp_path / "data"
+def data_root(tmp_path: Path) -> Iterator[Path]:
+    from tennis.db import dispose_engines
+
+    root = tmp_path / "data"
+    yield root
+    dispose_engines()
