@@ -1,4 +1,4 @@
-# Running the UI on a server (TrueNAS / HexOS, as a Docker app)
+# Running the app on a server (TrueNAS / HexOS, as a Docker app)
 
 Every push to `main` builds a Docker image and publishes it as
 `ghcr.io/xpoteka/tennisanalyzer:latest` (the `image` job in
@@ -6,22 +6,22 @@ Every push to `main` builds a Docker image and publishes it as
 type checks and tests pass. A pull request builds the image without publishing it. TrueNAS
 runs that image as a custom app. Nothing needs to be installed on the NAS.
 
-The image is **CPU only**: PyTorch without CUDA, so the image stays around 1.5 GB. Pose
-extraction is therefore several times slower than on an Apple-silicon Mac.
+The image is **CPU only**: PyTorch without CUDA, so the image stays around 1.5 GB. The
+analysis is therefore several times slower than on an Apple-silicon Mac.
 
 ## 1. A dataset for the data
 
 Create a dataset, for example `tennis-data` (HexOS: a folder on your pool). It holds
-everything that must survive an update: the config, the sessions, **every uploaded video**,
-and the downloaded models.
+everything that must survive an update: the config, the database (sessions, players, shots),
+**every uploaded video**, and the downloaded models.
 
 The app runs as TrueNAS's `apps` user (uid 568), so give that user read and write access:
 **Datasets → tennis-data → Permissions → Edit → Add item → User: apps → Modify**.
 
 Tip: also share the dataset over SMB (with your own user added to the permissions). Then you
-can copy videos from your Mac straight into `tennis-data/uploads/` in Finder. They appear in
-the **Videos** view, and for multi-GB files this is much faster than uploading through the
-browser.
+can copy videos from your Mac straight into `tennis-data/uploads/` in Finder. They appear on
+the **Upload** page under "Videos already on the server", and for multi-GB files this is much
+faster than uploading through the browser.
 
 ## 2. Install the app
 
@@ -38,8 +38,8 @@ The **Custom App** form works too, with the same settings: image
 `ghcr.io/xpoteka/tennisanalyzer`, tag `latest`, the environment variable, port 8731, and a
 host path mounted at `/data`.
 
-On first start the app writes `/data/config.yaml`, which the UI's **Config** view edits.
-Models (YOLO, Whisper) are downloaded into `/data/models/` the first time they are needed.
+On first start the app writes `/data/config.yaml`, which the app's **Settings** page edits.
+Models (YOLO) are downloaded into `/data/models/` the first time they are needed.
 
 ## 3. Updating
 
@@ -66,22 +66,18 @@ SSL tab with **Force SSL** on. For plain nginx, allow request bodies of at least
 
 The login cookie is marked `Secure` whenever the proxy reports HTTPS.
 
-## Moving your existing sessions from the Mac
+## Moving your sessions from the Mac
 
-1. Copy the Mac's `data/` folder into the dataset, so that `tennis-data/sessions/`,
-   `tennis-data/models/` and `tennis-data/uploads/` exist.
-2. Copy the raw videos of those sessions into `tennis-data/uploads/`, keeping their names.
-   To keep their modification times, drag them in Finder, or use `rsync -t`. Otherwise
-   every stage reruns the first time.
-3. In the UI, run **All commands → Relink moved videos**. Every session whose video is
-   missing is pointed at the file of the same name and size in `uploads/`. Videos uploaded
-   from now on are linked relative to the data folder, so this is a one-time step.
+Stop the app on the Mac, then copy its whole `data/` folder into the dataset: `tennis.db`,
+`uploads/`, `videos/`, `sessions/`, `players/` and `models/`. Videos inside `uploads/` are
+stored relative to the data folder, so they are found in their new place. A video that was
+analysed from somewhere else on the Mac needs to be uploaded again.
 
 ## Good to know
 
-- **Disk.** Uploaded videos are never removed automatically. The **Videos** view shows the
-  free space, and deleting a video there keeps its sessions' results. Only rerunning the
-  pipeline needs the video.
+- **Disk.** Uploaded videos are never removed automatically. **Settings → Video library**
+  shows the free space, and deleting a video there keeps its sessions' results. Only
+  re-analysing and playback need the video.
 - **Security.** Anyone with the password can run the pipeline and read any file the app
   can. Use a long password, and keep the app behind HTTPS. Failed logins are slowed to
   about one per second.

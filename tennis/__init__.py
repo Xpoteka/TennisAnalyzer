@@ -1,3 +1,3 @@
-"""Tennis technique analyzer: session video in, technique report out."""
+"""Tennis Analyzer: session videos in; shots, ball stats, scores and player profiles out."""
 
-__version__ = "0.1.0"
+__version__ = "2.0.0.dev0"

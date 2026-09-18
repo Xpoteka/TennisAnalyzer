@@ -12,3 +12,5 @@ config.yaml
 *.pt
 .claude
 .DS_Store
+web/node_modules
+tennis/api/static

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tennis",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "tennis", "serve", "--no-open", "--port", "8731"],
+      "port": 8731
+    }
+  ]
+}

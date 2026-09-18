@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:1
-# Tennis Technique Analyzer: the browser UI and the whole pipeline, CPU only.
+# Tennis Analyzer: the web app and the whole analysis pipeline, CPU only.
 # Built and pushed to ghcr.io by .github/workflows/ci.yml; see docs/DEPLOY.md to run it.
+
+# The React UI, built into tennis/api/static.
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/ ./
+RUN npm run build -- --outDir /static
 
 FROM python:3.11-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /bin/uv
@@ -12,6 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-dev --no-install-project
 COPY . /app
+COPY --from=web /static /app/tennis/api/static
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 
 
@@ -40,6 +49,6 @@ USER 568:568
 VOLUME /data
 EXPOSE 8731
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"TENNIS_PORT\"]}/login', timeout=4)"
+    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"TENNIS_PORT\"]}/api/health', timeout=4)"
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
