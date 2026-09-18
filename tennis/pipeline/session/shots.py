@@ -395,7 +395,7 @@ def run(ctx: SessionContext) -> None:
         for label, voted in hands.items():
             pid = player_of.get(label)
             player = db.get(Player, pid) if pid else None
-            if player is not None and voted and player.handedness is None:
+            if player is not None and voted:
                 player.handedness = voted
                 db.add(player)
     ctx.log(

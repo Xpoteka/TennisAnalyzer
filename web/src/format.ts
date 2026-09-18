@@ -1,9 +1,13 @@
 import type { SessionSummary } from "./api";
 
+// The interface is in English, so dates are too (a German weekday next to "afternoon" reads
+// oddly). British order: day before month.
+const LOCALE = "en-GB";
+
 export function sessionTitle(s: Pick<SessionSummary, "name" | "recorded_at" | "created_at">) {
   if (s.name) return s.name;
   const d = new Date(s.recorded_at ?? s.created_at);
-  const day = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  const day = d.toLocaleDateString(LOCALE, { weekday: "short", day: "numeric", month: "short" });
   const h = d.getHours();
   const part = h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
   return `${day}, ${part}`;
@@ -11,7 +15,7 @@ export function sessionTitle(s: Pick<SessionSummary, "name" | "recorded_at" | "c
 
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleDateString(undefined, {
+  return new Date(iso).toLocaleDateString(LOCALE, {
     day: "numeric",
     month: "short",
     year: "numeric",

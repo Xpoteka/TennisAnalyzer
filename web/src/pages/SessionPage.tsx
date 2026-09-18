@@ -278,11 +278,7 @@ function Overview({
   }
   return (
     <div className="stack" style={{ gap: 20 }}>
-      {score?.text && (
-        <div className="card row" style={{ justifyContent: "space-between" }}>
-          <strong style={{ fontSize: 22 }}>{score.text}</strong>
-        </div>
-      )}
+      {score?.text && <Scoreboard s={s} />}
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
         {s.players.map((p, i) => {
           const st = p.stats as PlayerStats;
@@ -353,6 +349,65 @@ function Overview({
           not available. Shot counts and technique still are.
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function Scoreboard({ s }: { s: SessionDetail }) {
+  const score = s.summary.score as
+    | { sets?: number[][]; current?: number[]; players?: number[]; points?: number }
+    | undefined;
+  if (!score?.players) return null;
+  const columns = [...(score.sets ?? [])];
+  const current = score.current ?? [0, 0];
+  const unfinished = current[0] + current[1] > 0 || columns.length === 0;
+  if (unfinished) columns.push(current);
+  return (
+    <div className="card stack" style={{ gap: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Score</h2>
+        <span className="small muted">
+          counted from {score.points ?? 0} points · point winners are estimated and can be wrong
+        </span>
+      </div>
+      <table style={{ width: "auto" }}>
+        <tbody>
+          {score.players.map((pid, i) => {
+            const p = s.players.find((x) => x.player_id === pid);
+            return (
+              <tr key={pid}>
+                <td style={{ paddingLeft: 0 }}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: 10,
+                      height: 10,
+                      borderRadius: 5,
+                      marginRight: 8,
+                      background: PLAYER_COLORS[s.players.findIndex((x) => x.player_id === pid) % PLAYER_COLORS.length],
+                    }}
+                  />
+                  <strong>{p?.name ?? `Player ${i + 1}`}</strong>
+                </td>
+                {columns.map((set, k) => (
+                  <td
+                    key={k}
+                    className="num"
+                    style={{
+                      fontSize: 20,
+                      fontWeight: set[i] > set[1 - i] ? 700 : 400,
+                      color: unfinished && k === columns.length - 1 ? "var(--muted)" : undefined,
+                    }}
+                  >
+                    {set[i]}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {unfinished && <div className="small muted">The last set was still being played when the video ended.</div>}
     </div>
   );
 }
@@ -465,6 +520,17 @@ function ShotTable({
   );
 }
 
+const ENDINGS: Record<string, string> = {
+  winner: "winner",
+  ace: "ace",
+  out: "out",
+  net: "into the net",
+  double_fault: "double fault",
+  fault: "first serve fault",
+  not_a_point: "between points",
+  unknown: "—",
+};
+
 function Points({
   s,
   rallies,
@@ -474,36 +540,54 @@ function Points({
   rallies: Rally[];
   playAt: (t: number) => void;
 }) {
+  const [all, setAll] = useState(false);
   const names = Object.fromEntries(s.players.map((p) => [p.player_id, p.name]));
+  const shown = rallies.filter((r) => all || (r.end_reason !== "not_a_point" && r.end_reason !== "fault"));
   if (!rallies.length) return <div className="card empty">No points found yet.</div>;
+  let point = 0;
   return (
-    <div className="card table-wrap" style={{ padding: 0 }}>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Time</th>
-            <th>Score before</th>
-            <th>Server</th>
-            <th className="num">Shots</th>
-            <th>Won by</th>
-            <th>How</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rallies.map((r) => (
-            <tr key={r.id} className="clickable" onClick={() => playAt(r.start_s)}>
-              <td>{r.index + 1}</td>
-              <td className="mono">{formatClock(r.start_s)}</td>
-              <td className="mono">{(r.score_before?.text as string) ?? "—"}</td>
-              <td>{r.server_id != null ? names[r.server_id] : "—"}</td>
-              <td className="num">{r.shot_count}</td>
-              <td>{r.winner_id != null ? names[r.winner_id] : "—"}</td>
-              <td>{r.end_reason?.replace("_", " ") ?? "—"}</td>
+    <div className="stack">
+      <label className="row small muted" style={{ gap: 6 }}>
+        <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
+        Also show faults and balls hit between points
+      </label>
+      <div className="card table-wrap" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Point</th>
+              <th>Time</th>
+              <th>Score before</th>
+              <th>Server</th>
+              <th className="num">Shots</th>
+              <th>Won by</th>
+              <th>Ended</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {shown.map((r) => {
+              const isPoint = r.score_before != null;
+              if (isPoint) point += 1;
+              return (
+                <tr
+                  key={r.id}
+                  className="clickable"
+                  onClick={() => playAt(r.start_s)}
+                  style={isPoint ? undefined : { opacity: 0.55 }}
+                >
+                  <td>{isPoint ? point : ""}</td>
+                  <td className="mono">{formatClock(r.start_s)}</td>
+                  <td className="mono">{(r.score_before?.text as string) ?? "—"}</td>
+                  <td>{r.server_id != null ? names[r.server_id] : "—"}</td>
+                  <td className="num">{r.shot_count}</td>
+                  <td>{r.winner_id != null ? names[r.winner_id] : "—"}</td>
+                  <td>{ENDINGS[r.end_reason ?? "unknown"] ?? r.end_reason}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
