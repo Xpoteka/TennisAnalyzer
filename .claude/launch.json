@@ -13,21 +13,6 @@
         "8731"
       ],
       "port": 8731
-    },
-    {
-      "name": "tennis-wf",
-      "runtimeExecutable": "uv",
-      "runtimeArgs": [
-        "run",
-        "tennis",
-        "serve",
-        "--no-open",
-        "--port",
-        "8732",
-        "--data-root",
-        "/private/tmp/claude-501/-Users-jeremiehamel-dev-repos-TennisAnalyzer/993ee37f-8a64-4b1f-8b89-b1fd8debefdd/scratchpad/wf"
-      ],
-      "port": 8732
     }
   ]
 }
