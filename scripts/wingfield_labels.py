@@ -11,8 +11,10 @@ Writes, with times copied as-is from the export (whole seconds, Wingfield's cloc
 
     contacts_<id>.csv   your own shots        -> tune-contacts --target self
     hits_all_<id>.csv   every shot            -> tune-contacts --target any
-    rallies_<id>.csv    rally start,end       -> tune-contacts --segments
-    strokes_<id>.csv    shot type per shot    -> eval-classifier (M5)
+    rallies_<id>.csv    rally start,end       -> rally boundaries
+    strokes_<id>.csv    shot type per shot    -> tennis eval-shots
+    points_<id>.csv     every point: start, end, server, winner, how it ended
+                                              -> tennis eval-points
 
 Player names are not written; shots are marked ``self`` or ``other``.
 
@@ -110,6 +112,31 @@ def main() -> int:
         args.out / f"rallies_{sid}.csv",
         ["start", "end"],
         [[seconds(r["Start Time"]), seconds(r["End Time"]) + 1] for r in rallies],
+        note,
+    )
+    points: dict[object, list[dict[str, object]]] = {}
+    for r in rallies:
+        if r["Start Time"] is None or r["Point #"] is None:
+            continue  # rows Wingfield added without a time
+        points.setdefault(r["Point #"], []).append(r)
+
+    def side(name: object) -> str:
+        return "self" if str(name).strip() == player.strip() else "other"
+
+    write(
+        args.out / f"points_{sid}.csv",
+        ["t", "end", "server", "winner", "ending", "faults"],
+        [
+            [
+                seconds(rs[0]["Start Time"]),
+                seconds(rs[-1]["End Time"]) + 1,
+                side(rs[0]["Serving Player"]),
+                side(rs[-1]["Won By"]),
+                str(rs[-1]["Rally Ending"]).lower(),
+                sum(1 for r in rs if str(r["Rally Ending"]).upper() == "FIRST_SERVE_FAULT"),
+            ]
+            for _, rs in sorted(points.items(), key=lambda kv: seconds(kv[1][0]["Start Time"]))
+        ],
         note,
     )
     return 0

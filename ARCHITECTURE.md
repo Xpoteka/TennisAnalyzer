@@ -55,6 +55,8 @@ Every output must also still exist.
 | court | `court.json`, `court.jpg` | Court and camera from the median of 24 frames (`vision/court.py`). `found: false` when it does not fit or the view is too low. |
 | people | `people.parquet` | YOLO pose at ~10 fps over the whole video, feet on court in metres, clothing colour, `track_id`. Far players come from a detector on an enlarged crop of the far half, with pose from a tight zoomed crop. |
 | ball | `ball.parquet` | Every frame: three-frame motion blobs scored for ball colour and shape, linked into tracklets (`vision/ball.py`). |
+| motion | `motion.parquet` | Every frame: pose of each tracked player from an enlarged crop around the tracker's box. The swings at full frame rate. |
+| hits | `hits.parquet` | Hit times, side and hitter track (`vision/hits.py`): candidates from sound, ball turns and wrist-speed peaks, scored per side, then the best sequence under the rally rules (alternate sides, ≥0.55 s apart) by dynamic programming. |
 
 ### Court and camera (`tennis/vision/court.py`)
 
@@ -77,6 +79,23 @@ Court metres: origin at the centre of the net, `x` across (right as seen from th
 | Stage | Does |
 |---|---|
 | timeline | Places each video on the session clock (`Video.offset_s`), by creation time for now. Audio sync comes with multi-video support. |
+| identities | Joins tracks into players (`identities.json`, `SessionPlayer`). Singles: tracks seen together are different people; the relation is chained along a maximum spanning tree of "seen together", and clothing colour only matches parts that never meet. Thumbnails per player. |
+| shots | One `Shot` per hit: player, stroke (`vision/strokes.py`: overhead → serve/smash, forehand/backhand from the hands' direction across the body, volley near the net, spin from the wrist path), ball flight (`vision/physics.py`: gravity, drag, one bounce, fitted to the ball pixels) → speed, net clearance, apex, bounce, in/out, depth, direction. Rallies: a serve starts one, a 3 s pause ends one. Racket hand from serves (the hand above the head at contact). |
+| kind | Training or match (`analysis/kind.py`) from serve runs, serve spacing and rally lengths, unless set by hand. |
+| scoring | Matches only (`analysis/scoring.py`): points are serve-started rallies, first-serve faults folded in; point winners from how the rally ended; games from server runs and sets decoded under the rules. |
+| summary | Per-player stats and the session headline. In a match, only shots in points count. |
+
+### Measured on the Wingfield match (30 min, hand-labelled shot log)
+
+| What | Result | Note |
+|---|---|---|
+| Court | quality 0.94 | camera 4.1 m behind the baseline, 4.6 m high |
+| Hits found | 87.5% of labelled hits | labels are whole seconds; many "extra" hits are balls hit back between points, and returns missing from the log |
+| Who hit | 90.9% | |
+| Stroke | 76.6% | serve 83%, forehand 75%, backhand 70%, volleys weak |
+| Session type | match (p = 0.83) | |
+| Server of a point | 98% | |
+| Winner of a point | 55% | **weak**: the last shot of a point is often missed or followed by a ball hit back |
 
 **Times in the database are session seconds.** A video's PTS `t` is at session time `t + offset_s`.
 

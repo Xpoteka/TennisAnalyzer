@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tennis.pipeline import VideoStage
-from tennis.pipeline.video import audio, ball, court, ingest, people, proxy
+from tennis.pipeline.video import audio, ball, court, hits, ingest, motion, people, proxy
 
 VIDEO_STAGES: tuple[VideoStage, ...] = (
     VideoStage(
@@ -29,5 +29,13 @@ VIDEO_STAGES: tuple[VideoStage, ...] = (
     VideoStage(
         "ball", ball.run, ball.OUTPUTS, config_keys=("ball",), weight=4.0,
         title="Tracking the ball",
+    ),
+    VideoStage(
+        "motion", motion.run, motion.OUTPUTS, config_keys=("pose",), weight=6.0,
+        title="Following every swing",
+    ),
+    VideoStage(
+        "hits", hits.run, hits.OUTPUTS, weight=0.3,
+        title="Finding the hits",
     ),
 )  # fmt: skip

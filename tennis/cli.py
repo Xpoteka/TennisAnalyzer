@@ -157,6 +157,145 @@ def review(
     print(render(root, video_id, source, start, duration))
 
 
+@app.command("eval-hits")
+def eval_hits(
+    video_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with a t column (and optionally player)")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to video time, seconds")] = 0.0,
+    resolution: Annotated[float, typer.Option(help="Label time resolution, seconds")] = 0.0,
+    verbose: Annotated[bool, typer.Option(help="List misses and extra detections")] = False,
+) -> None:
+    """Compare a video's detected hits with hand-made labels."""
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from tennis.evaluation import evaluate_hits, parse_time, read_labels
+    from tennis.pipeline import video_dir
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    if not rows:
+        raise UserError(f"{labels} has no labels")
+    key = "t" if "t" in rows[0] else next(iter(rows[0]))
+    label_t = np.array([parse_time(r[key]) for r in rows])
+    hits = pq.read_table(video_dir(root, video_id) / "hits.parquet").to_pydict()
+    hit_t = np.asarray(hits["t"], np.float64)
+    report, matches = evaluate_hits(hit_t, label_t, offset=offset, resolution=resolution)
+    print(report.text())
+    if verbose:
+        matched_labels = {m.label_index for m in matches}
+        for i in np.argsort(label_t):
+            if i not in matched_labels:
+                print(f"  missed label {label_t[i]:8.1f}  {rows[i]}")
+
+
+@app.command("eval-shots")
+def eval_shots(
+    session_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with t, and player and stroke columns")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to session time, seconds")] = 0.0,
+    resolution: Annotated[float, typer.Option(help="Label time resolution, seconds")] = 0.0,
+) -> None:
+    """Compare a session's shots (hitter and stroke) with hand-made labels."""
+    import numpy as np
+    from sqlmodel import col, select
+
+    from tennis.db import session_scope
+    from tennis.db.models import SessionPlayer, Shot
+    from tennis.evaluation import evaluate_shots, read_labels
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    if not rows:
+        raise UserError(f"{labels} has no labels")
+    with session_scope(root) as db:
+        shots = list(
+            db.exec(select(Shot).where(Shot.session_id == session_id).order_by(col(Shot.t)))
+        )
+        label_of = {
+            sp.player_id: sp.label
+            for sp in db.exec(select(SessionPlayer).where(SessionPlayer.session_id == session_id))
+        }
+    report = evaluate_shots(
+        np.array([s.t for s in shots]),
+        [label_of.get(s.player_id) if s.player_id else None for s in shots],
+        [s.stroke for s in shots],
+        rows,
+        offset=offset,
+        resolution=resolution,
+    )
+    print(report.text())
+
+
+@app.command("eval-points")
+def eval_points(
+    session_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with t, end, server, winner per point")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to session time, seconds")] = 0.0,
+) -> None:
+    """Compare a match's points (server and winner) with hand-made labels."""
+    from sqlmodel import col, select
+
+    from tennis.db import session_scope
+    from tennis.db.models import Rally, SessionPlayer
+    from tennis.evaluation import parse_time, read_labels
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    with session_scope(root) as db:
+        rallies = [
+            r
+            for r in db.exec(
+                select(Rally).where(Rally.session_id == session_id).order_by(col(Rally.start_s))
+            )
+            if r.score_before is not None
+        ]
+        label_of = {
+            sp.player_id: sp.label
+            for sp in db.exec(select(SessionPlayer).where(SessionPlayer.session_id == session_id))
+        }
+    used: set[int] = set()
+    pairs = []
+    for row in rows:
+        lo = parse_time(row["t"]) + offset - 1.5
+        hi = parse_time(row["end"]) + offset + 2.5
+        for r in rallies:
+            if r.id not in used and lo <= r.start_s <= hi:
+                used.add(r.id or 0)
+                pairs.append((row, r))
+                break
+    print(f"points: labelled {len(rows)}, found {len(rallies)}, matched {len(pairs)}")
+    if not pairs:
+        return
+    # Which found player is "self": the one who served most of the labelled self serves.
+    votes: dict[str, int] = {}
+    for row, r in pairs:
+        who = label_of.get(r.server_id or -1)
+        if who:
+            votes[who] = votes.get(who, 0) + (1 if row["server"] == "self" else -1)
+    me = max(votes, key=lambda k: votes[k]) if votes else None
+
+    def side(pid: int | None) -> str | None:
+        who = label_of.get(pid or -1)
+        return None if who is None else ("self" if who == me else "other")
+
+    server_ok = sum(1 for row, r in pairs if side(r.server_id) == row["server"])
+    winner_ok = sum(1 for row, r in pairs if side(r.winner_id) == row["winner"])
+    print(f"self = player {me}")
+    print(f"server right: {server_ok}/{len(pairs)} ({server_ok / len(pairs):.0%})")
+    print(f"winner right: {winner_ok}/{len(pairs)} ({winner_ok / len(pairs):.0%})")
+    for who in ("self", "other"):
+        truth = sum(1 for row in rows if row["winner"] == who)
+        found = sum(1 for r in rallies if side(r.winner_id) == who)
+        print(f"points won by {who}: labelled {truth}, found {found}")
+
+
 @app.command("run-job", hidden=True)
 def run_job(job_id: int, config: ConfigOpt = None, data_root: DataRootOpt = None) -> None:
     """Run one queued job (the worker starts this in a subprocess)."""
