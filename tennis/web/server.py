@@ -5,16 +5,18 @@ build, and it starts instantly. It does two things — read the session director
 what exists, and run CLI commands as subprocesses through :mod:`tennis.web.jobs`. Every
 computation still happens in the CLI, so the browser and the terminal cannot disagree.
 
-It binds to the loopback interface and refuses cross-origin writes, because a local server
-that can start commands must not be reachable from a page the user happens to have open.
+It binds to the loopback interface by default and refuses cross-origin writes, because a
+server that can start commands must not be reachable from a page the user happens to have
+open. On a server (``--host 0.0.0.0``) it also asks for a password: see :mod:`tennis.web.auth`.
 """
 
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import mimetypes
-import re
+import signal
 import threading
 import webbrowser
 from datetime import datetime
@@ -30,15 +32,32 @@ from tennis.errors import TennisError, UserError
 from tennis.session import SESSION_ID_RE, VIDEO_SUFFIXES, Session, list_sessions, sessions_root
 from tennis.stages import STAGES, stage_status
 from tennis.util.io import is_dataless
+from tennis.web import auth as authn
 from tennis.web.commands import COMMANDS, COMMANDS_BY_NAME, GROUPS, build_argv
 from tennis.web.jobs import JobRunner
+from tennis.web.library import (
+    PARTIAL_DIR,
+    UPLOADS_DIR,
+    UploadError,
+    Uploads,
+    delete_video,
+    list_videos,
+)
 
 STATIC = Path(__file__).parent / "static"
-UPLOADS_DIR = "uploads"
-MAX_UPLOAD_BYTES = 32 * 1024**3  # 32 GiB: a long 4K session, not a typo'd header
 MAX_BODY_BYTES = 4 * 1024**2  # JSON bodies
-SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 LABEL_SUFFIXES = {".csv", ".txt"}
+# Reachable without logging in: the login page itself and what it needs to render.
+PUBLIC_PATHS = {"/login", "/api/login", "/static/style.css", "/favicon.ico"}
+UPLOAD_STATUS = {
+    "bad": HTTPStatus.BAD_REQUEST,
+    "type": HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+    "size": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+    "space": HTTPStatus.INSUFFICIENT_STORAGE,
+    "offset": HTTPStatus.CONFLICT,
+    "conflict": HTTPStatus.CONFLICT,
+    "missing": HTTPStatus.NOT_FOUND,
+}
 DEFAULT_CONFIG_TEXT = """# Every key has a default; see config.example.yaml for the full list.
 paths:
   data_root: ./data
@@ -48,20 +67,31 @@ paths:
 class WebError(Exception):
     """An HTTP-level failure with the status to send back."""
 
-    def __init__(self, status: HTTPStatus, message: str) -> None:
+    def __init__(
+        self, status: HTTPStatus, message: str, extra: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.extra = extra or {}
 
 
 class App:
     """Everything the request handler needs: where the data is, and what is running."""
 
-    def __init__(self, config: Config, config_path: Path | None, project_root: Path) -> None:
+    def __init__(
+        self,
+        config: Config,
+        config_path: Path | None,
+        project_root: Path,
+        auth: authn.Auth | None = None,
+    ) -> None:
         self._config = config
         self.config_path = config_path
         self.project_root = project_root
+        self.auth = auth
         self.jobs = JobRunner(project_root)
+        self._uploads: Uploads | None = None
 
     @property
     def config(self) -> Config:
@@ -90,6 +120,14 @@ class App:
     @property
     def uploads_dir(self) -> Path:
         return self.data_root / UPLOADS_DIR
+
+    @property
+    def uploads(self) -> Uploads:
+        """The upload tracker for the current data root (the config may move it)."""
+        partial_root = self.uploads_dir / PARTIAL_DIR
+        if self._uploads is None or self._uploads.partial_root != partial_root:
+            self._uploads = Uploads(partial_root)
+        return self._uploads
 
     def session(self, session_id: str) -> Session:
         if not SESSION_ID_RE.match(session_id):
@@ -291,6 +329,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     app: App  # set by make_server
     verbose: bool = False
+    _body: bytes = b""  # the request body, read up front (not for upload pieces)
+    _unread_body: bool = False
 
     # --- plumbing ----------------------------------------------------------------------
 
@@ -311,14 +351,30 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
+        # A request body left unread would be taken for the start of the next request on
+        # this kept-alive connection. Small bodies are read up front; an upload piece is
+        # streamed to disk, and when it is refused unread the connection is closed instead.
+        self._body = b""
+        self._unread_body = method == "POST" and int(self.headers.get("Content-Length") or 0) > 0
         try:
             if method == "POST":
+                if path != "/api/upload":
+                    self._body = self._read_body()
                 self._check_same_origin()
+            if not self._authorized(path):
+                if method == "GET" and not path.startswith(("/api/", "/files/")):
+                    self._redirect("/login")
+                    return
+                raise WebError(HTTPStatus.UNAUTHORIZED, "log in first")
+            if method == "POST":
                 self._route_post(path, query)
             else:
                 self._route_get(path, query, head=method == "HEAD")
         except WebError as exc:
-            self._send_json({"error": exc.message}, exc.status)
+            self._send_json({"error": exc.message, **exc.extra}, exc.status)
+        except UploadError as exc:
+            status = UPLOAD_STATUS.get(exc.kind, HTTPStatus.BAD_REQUEST)
+            self._send_json({"error": exc.message, **exc.extra}, status)
         except TennisError as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except BrokenPipeError:  # the tab was closed mid-response
@@ -334,9 +390,22 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is None:
             return  # not a browser fetch (curl, tests): no ambient credentials to abuse
-        host = self.headers.get("Host", "")
-        if urlparse(origin).netloc != host:
+        # Behind a reverse proxy the browser's host arrives as X-Forwarded-Host. Another site
+        # cannot set that header on a cross-origin request without a preflight we never grant.
+        hosts = {self.headers.get("Host", ""), self.headers.get("X-Forwarded-Host", "")}
+        if urlparse(origin).netloc not in hosts - {""}:
             raise WebError(HTTPStatus.FORBIDDEN, f"cross-origin request from {origin} refused")
+
+    def _authorized(self, path: str) -> bool:
+        auth = self.app.auth
+        if auth is None or path in PUBLIC_PATHS:
+            return True
+        return auth.verify(authn.cookie_value(self.headers.get("Cookie")))
+
+    @property
+    def _https(self) -> bool:
+        """Whether the browser reached us over HTTPS (through a TLS-terminating proxy)."""
+        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
 
     # --- routing -----------------------------------------------------------------------
 
@@ -344,6 +413,11 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         if path in {"/", "/index.html"}:
             self._send_file(STATIC / "index.html", head=head, cache=False)
+        elif path == "/login":
+            if app.auth is None:
+                self._redirect("/")
+            else:
+                self._send_file(STATIC / "login.html", head=head, cache=False)
         elif path.startswith("/static/"):
             self._send_file(_under(STATIC, path[len("/static/") :]), head=head, cache=False)
         elif path == "/api/meta":
@@ -369,6 +443,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise WebError(HTTPStatus.NOT_FOUND, f"no such endpoint: {path}")
         elif path == "/api/labels":
             self._send_json({"files": self._label_files()})
+        elif path == "/api/videos":
+            self._send_json(list_videos(app.data_root))
+        elif path == "/api/upload":
+            self._send_json(app.uploads.status(self._upload_target(query)))
         elif path == "/api/config":
             self._send_json(self._config_payload())
         elif path == "/api/jobs":
@@ -396,8 +474,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
         elif path == "/api/upload":
             self._send_json(self._upload(query))
+        elif path == "/api/upload/discard":
+            self._send_json({"discarded": app.uploads.discard(self._upload_target(query))})
+        elif path == "/api/videos/delete":
+            self._send_json(delete_video(app.data_root, str(self._read_json().get("name", ""))))
         elif path == "/api/config":
             self._send_json(self._save_config(self._read_json()))
+        elif path == "/api/login":
+            self._login(self._read_json())
+        elif path == "/api/logout":
+            self._send_json({"ok": True}, extra={"Set-Cookie": authn.clear_cookie(self._https)})
         else:
             raise WebError(HTTPStatus.NOT_FOUND, f"no such path: {path}")
 
@@ -411,6 +497,7 @@ class Handler(BaseHTTPRequestHandler):
             "labels_dir": str(app.labels_dir.resolve()),
             "config_path": str(app.config_path) if app.config_path else None,
             "uploads_dir": str(app.uploads_dir),
+            "auth": app.auth is not None,
             "video_suffixes": sorted(VIDEO_SUFFIXES),
             "groups": list(GROUPS),
             "commands": [c.as_json() for c in COMMANDS],
@@ -486,61 +573,45 @@ class Handler(BaseHTTPRequestHandler):
         job = self.app.jobs.submit(name, argv, command.title, session_id)
         return job.as_json()
 
-    def _upload(self, query: dict[str, list[str]]) -> dict[str, Any]:
+    def _upload_target(self, query: dict[str, list[str]]) -> Any:
+        """The upload a request is about: ``?kind=video|labels&name=...&size=<bytes>``."""
         kind = (query.get("kind") or ["video"])[0]
-        raw_name = (query.get("name") or [""])[0]
-        name = SAFE_NAME.sub("_", Path(raw_name).name).lstrip(".")
-        if not name:
-            raise WebError(HTTPStatus.BAD_REQUEST, "missing ?name=")
-        suffix = Path(name).suffix.lower()
         if kind == "video":
-            if suffix not in VIDEO_SUFFIXES:
-                raise WebError(
-                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-                    f"'{suffix or name}' is not a video: expected "
-                    + ", ".join(sorted(VIDEO_SUFFIXES)),
-                )
-            directory = self.app.uploads_dir
+            directory, suffixes = self.app.uploads_dir, VIDEO_SUFFIXES
         elif kind == "labels":
-            if suffix not in LABEL_SUFFIXES:
-                raise WebError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, f"expected a .csv, got '{name}'")
-            directory = self.app.labels_dir
+            directory, suffixes = self.app.labels_dir, LABEL_SUFFIXES
         else:
             raise WebError(HTTPStatus.BAD_REQUEST, f"unknown upload kind {kind!r}")
+        # Without ?size= the body is the whole file, as a small label upload sends it.
+        size = (query.get("size") or [self.headers.get("Content-Length") or "0"])[0]
+        if not size.isdigit():
+            raise WebError(HTTPStatus.BAD_REQUEST, "size must be a number of bytes")
+        return self.app.uploads.target(
+            directory, (query.get("name") or [""])[0], int(size), suffixes
+        )
 
+    def _upload(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        """One piece of a file: ``?offset=`` says where it goes. See :mod:`.library`."""
+        target = self._upload_target(query)
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             raise WebError(HTTPStatus.LENGTH_REQUIRED, "missing or empty Content-Length")
-        if length > MAX_UPLOAD_BYTES:
-            raise WebError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "file is too large")
+        offset = (query.get("offset") or ["0"])[0]
+        if not offset.isdigit():
+            raise WebError(HTTPStatus.BAD_REQUEST, "offset must be a number of bytes")
+        result: dict[str, Any] = self.app.uploads.write(target, int(offset), length, self.rfile)
+        self._unread_body = False
+        return result
 
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / name
-        if target.exists() and target.stat().st_size == length:
-            # The same file dropped twice: reuse it instead of copying gigabytes again.
-            self._drain(length)
-            return {"path": str(target.resolve()), "name": name, "reused": True}
-        target = _free_path(target)
-        written = 0
-        with target.open("wb") as fh:
-            while written < length:
-                chunk = self.rfile.read(min(1024 * 1024, length - written))
-                if not chunk:
-                    break
-                fh.write(chunk)
-                written += len(chunk)
-        if written != length:
-            target.unlink(missing_ok=True)
-            raise WebError(HTTPStatus.BAD_REQUEST, "upload was cut short")
-        return {"path": str(target.resolve()), "name": target.name, "reused": False}
-
-    def _drain(self, length: int) -> None:
-        left = length
-        while left > 0:
-            chunk = self.rfile.read(min(1024 * 1024, left))
-            if not chunk:
-                return
-            left -= len(chunk)
+    def _login(self, body: dict[str, Any]) -> None:
+        auth = self.app.auth
+        if auth is None:
+            self._send_json({"ok": True})
+            return
+        if not auth.check_password(str(body.get("password", ""))):
+            raise WebError(HTTPStatus.UNAUTHORIZED, "wrong password")
+        cookie = authn.set_cookie(auth.issue(), self._https)
+        self._send_json({"ok": True}, extra={"Set-Cookie": cookie})
 
     def _resolve_file(self, rel: str) -> Path:
         """Map ``/files/<root>/<rest>`` onto a directory the UI is allowed to serve."""
@@ -553,27 +624,49 @@ class Handler(BaseHTTPRequestHandler):
         base = roots.get(root_name)
         if base is None:
             raise WebError(HTTPStatus.NOT_FOUND, f"unknown file root {root_name!r}")
+        if any(part.startswith(".") for part in Path(rest).parts):
+            # Hidden files are internal: the login secret, stamps, unfinished uploads.
+            raise WebError(HTTPStatus.NOT_FOUND, "not found")
         return _under(base, rest)
 
     # --- responses ---------------------------------------------------------------------
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY_BYTES:
             raise WebError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self.rfile.read(length) if length else b""
+        self._unread_body = False
+        return raw
+
+    def _read_json(self) -> dict[str, Any]:
         try:
-            body = json.loads(raw or b"{}")
+            body = json.loads(self._body or b"{}")
         except json.JSONDecodeError as exc:
             raise WebError(HTTPStatus.BAD_REQUEST, f"invalid JSON: {exc}") from exc
         if not isinstance(body, dict):
             raise WebError(HTTPStatus.BAD_REQUEST, "expected a JSON object")
         return body
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        extra: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, allow_nan=False, default=str).encode()
-        self._send_head(status, "application/json; charset=utf-8", len(body))
+        self._send_head(status, "application/json; charset=utf-8", len(body), extra)
         self.wfile.write(body)
+
+    def _redirect(self, location: str) -> None:
+        self._send_head(HTTPStatus.SEE_OTHER, "text/plain", 0, {"Location": location})
+
+    def end_headers(self) -> None:
+        # Nothing here is meant to be framed by another site or sniffed into another type.
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        super().end_headers()
 
     def _send_head(
         self,
@@ -586,6 +679,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
+        if self._unread_body:
+            self.send_header("Connection", "close")  # see _dispatch
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -652,16 +747,6 @@ def _under(base: Path, rel: str) -> Path:
     return candidate
 
 
-def _free_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for n in range(2, 1000):
-        candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise WebError(HTTPStatus.CONFLICT, f"too many files named {path.stem}*")
-
-
 def make_server(
     config: Config,
     config_path: Path | None,
@@ -669,8 +754,12 @@ def make_server(
     host: str,
     port: int,
     verbose: bool = False,
+    password: str | None = None,
 ) -> tuple[ThreadingHTTPServer, App]:
-    app = App(config, config_path, project_root)
+    auth = None
+    if password is not None:
+        auth = authn.Auth(password, authn.load_secret(config.paths.data_root))
+    app = App(config, config_path, project_root, auth)
     handler = type("BoundHandler", (Handler,), {"app": app, "verbose": verbose})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
@@ -685,16 +774,31 @@ def serve(
     port: int = 8731,
     open_browser: bool = True,
     verbose: bool = False,
+    password: str | None = None,
 ) -> None:
     """Run the UI until interrupted."""
     if not STATIC.is_file() and not (STATIC / "index.html").is_file():
         raise UserError(f"the web UI's files are missing from {STATIC}")
-    server, app = make_server(config, config_path, project_root, host, port, verbose)
+    if password is None and not is_loopback(host):
+        raise UserError(
+            f"refusing to serve on {host} without a password: anyone who reaches the page "
+            f"could run commands on this machine. Set {authn.PASSWORD_ENV} or pass "
+            "--password-file (see docs/DEPLOY.md)"
+        )
+    if password is not None and len(password) < authn.MIN_PASSWORD_LENGTH:
+        raise UserError(
+            f"the UI password must be at least {authn.MIN_PASSWORD_LENGTH} characters long"
+        )
+    server, app = make_server(config, config_path, project_root, host, port, verbose, password)
     url = f"http://{host}:{server.server_address[1]}/"
-    print(f"tennis ui  {url}   (data root {app.data_root.resolve()})", flush=True)
+    login = "password required" if password is not None else "no password"
+    print(f"tennis ui  {url}   (data root {app.data_root.resolve()}, {login})", flush=True)
     print("press ctrl-c to stop", flush=True)
     if open_browser:
         threading.Timer(0.4, webbrowser.open, args=(url,)).start()
+    # A service manager stops us with SIGTERM: treat it like ctrl-c, so the running job is
+    # stopped too instead of carrying on in its own process group without us.
+    signal.signal(signal.SIGTERM, _interrupt)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -702,3 +806,16 @@ def serve(
     finally:
         app.jobs.shutdown()
         server.server_close()
+
+
+def is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt

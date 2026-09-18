@@ -1,0 +1,14 @@
+# Only what the image needs: the code, the lock file, the docs the UI serves.
+.git
+.github
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+data
+labels/*.csv
+config.yaml
+*.pt
+.claude
+.DS_Store

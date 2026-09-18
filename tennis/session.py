@@ -233,15 +233,31 @@ def check_video_file(video: Path) -> Path:
     return video.resolve()
 
 
+def link_source(session_dir: Path, video: Path, data_root: Path) -> Path:
+    """Link ``video`` into a session as ``source.<ext>``.
+
+    A video inside the data folder (the uploaded library) is linked by a relative path, so
+    the whole folder can be moved or copied to another machine without breaking the link.
+    Anything else is linked by its absolute path.
+    """
+    link = session_dir / f"{SOURCE_STEM}{video.suffix.lower()}"
+    root = data_root.resolve()
+    if root in video.parents:
+        link.symlink_to(os.path.relpath(video, session_dir.resolve()))
+    else:
+        link.symlink_to(video)
+    return link
+
+
 def create_or_reuse_session(
     data_root: Path, video: Path, created: datetime, session_id: str | None = None
 ) -> Session:
     """Find or create the session for ``video`` and link the raw file into it.
 
-    The raw video is never copied or modified; the session holds a symlink to its absolute
-    path. Re-processing the same video reuses its session. A derived ID that is already
-    taken by a different video gets a numeric suffix (``_2``, ``_3``, ...); an explicit
-    ``--session-id`` that is taken by a different video is an error.
+    The raw video is never copied or modified; the session holds a symlink to it (see
+    :func:`link_source`). Re-processing the same video reuses its session. A derived ID that
+    is already taken by a different video gets a numeric suffix (``_2``, ``_3``, ...); an
+    explicit ``--session-id`` that is taken by a different video is an error.
     """
     video = video.resolve()
     root = sessions_root(data_root)
@@ -261,13 +277,13 @@ def create_or_reuse_session(
         session = Session(id=sid, dir=d)
         if not d.exists():
             d.mkdir(parents=True)
-            (d / f"{SOURCE_STEM}{video.suffix.lower()}").symlink_to(video)
+            link_source(d, video, data_root)
             return session
         target = session.source_target()
         if target == video:
             return session
         if target is None and not any(d.iterdir()):
-            (d / f"{SOURCE_STEM}{video.suffix.lower()}").symlink_to(video)
+            link_source(d, video, data_root)
             return session
         if session_id is not None:
             raise UserError(
@@ -275,3 +291,50 @@ def create_or_reuse_session(
                 "choose another --session-id"
             )
     raise UserError(f"too many sessions named {candidates[0]}*; pass --session-id")
+
+
+@dataclass(frozen=True)
+class Relink:
+    """What :func:`relink_missing_sources` did for one session."""
+
+    session: str
+    missing: str  # where the link pointed
+    found: Path | None  # the file it points to now, if one was found
+    same_file: bool  # size and modification time match the last ingest run
+
+
+def relink_missing_sources(
+    data_root: Path, search_dirs: list[Path], dry_run: bool = False
+) -> list[Relink]:
+    """Point sessions whose raw video is gone at a file of the same name in ``search_dirs``.
+
+    For moving the data folder to another machine: the links still name the old paths. A
+    candidate must have the size the last ingest recorded; ``same_file`` also requires the
+    same modification time, without which every stage reruns (copy with ``rsync -t`` or
+    ``cp -p`` to keep it).
+    """
+    results = []
+    for session in list_sessions(data_root):
+        try:
+            link = session.source_link
+        except UserError:
+            continue
+        if link.exists():
+            continue
+        missing = os.readlink(link) if link.is_symlink() else str(link)
+        recorded = ((session.read_stamp("ingest") or {}).get("inputs") or {}).get(SOURCE_INPUT)
+        found = None
+        for directory in search_dirs:
+            candidate = directory / Path(missing).name
+            if not candidate.is_file():
+                continue
+            if recorded and candidate.stat().st_size != recorded[1]:
+                continue
+            found = candidate.resolve()
+            break
+        same = bool(found and recorded and found.stat().st_mtime_ns == recorded[0])
+        if found is not None and not dry_run:
+            link.unlink()
+            link_source(session.dir, found, data_root)
+        results.append(Relink(session.id, missing, found, same))
+    return results

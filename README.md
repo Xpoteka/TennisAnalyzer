@@ -27,11 +27,18 @@ This opens `http://127.0.0.1:8731/` in your browser. **Drop a session video on t
 is analysed**: the file is uploaded into `<data_root>/uploads/`, the whole pipeline runs, and the
 output streams into the console at the bottom of the page exactly as it would in a terminal.
 
-The page has four views:
+To run it on a server instead: every push to `main` publishes a Docker image,
+`ghcr.io/xpoteka/tennisanalyzer`, which runs as a TrueNAS custom app. See
+[docs/DEPLOY.md](docs/DEPLOY.md).
+
+The page has five views:
 
 - **Analyse** — the drop zone, the processing options, and a field for the path of a video
-  already on this machine. Use the path when the file is large: dropping it uploads a copy,
-  while a path is symlinked like any other session.
+  already on the server. Uploads go up in 32 MB pieces: one cut short resumes when the same
+  file is dropped again. A path is linked in place, without a copy.
+- **Videos** — every video kept in `<data_root>/uploads/`, which sessions use it, and the free
+  disk space. Analyse, download or delete each one, or discard an unfinished upload. Files
+  copied into that folder by other means (a network share) are listed too.
 - **Sessions** — every session with the status of each stage, a **Run the pipeline** button that
   continues a session that stopped part-way (finished stages are still skipped), and, for the one
   you pick:
@@ -51,8 +58,10 @@ Notes:
   at once would fight over the same files. Queued jobs are listed in the console drawer.
 - An action whose stage has not run yet is disabled and says which stage it needs, rather than
   starting a command that would fail on a missing input.
-- The server binds to loopback and refuses cross-origin writes. It is a single-user local tool;
-  do not expose it to a network.
+- The server binds to loopback and refuses cross-origin writes. To listen on a network
+  (`--host 0.0.0.0`) it requires a password, from `--password-file` or `TENNIS_UI_PASSWORD`,
+  and every page then asks you to log in. It is still a single-user tool: anyone with the
+  password can run commands on the machine.
 
 ## Recording guidelines
 
@@ -67,7 +76,8 @@ Notes:
 ## CLI
 
 ```text
-tennis ui [--port 8731] [--no-open]           # the browser UI
+tennis ui [--port 8731] [--no-open] [--host H --password-file PATH]   # the browser UI
+tennis relink [--dir PATH] [--dry-run]    # repoint sessions whose raw video moved
 tennis process <video> [--session-id ID] [--config PATH] [--force] [--from-stage N] [--no-labels]
 tennis list                               # sessions and the status of each stage
 tennis report <session-id> [--no-clips]   # rerun stages 8-9 for one session

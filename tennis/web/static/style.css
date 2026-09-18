@@ -114,12 +114,12 @@ button.primary {
 }
 button.primary:hover { background: var(--accent-dim); }
 button.primary:disabled { opacity: .5; cursor: not-allowed; }
-button.ghost {
+button.ghost, a.button.ghost {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: .45rem .8rem; cursor: pointer;
 }
-button.ghost:hover { border-color: var(--accent-dim); }
-button.small { padding: .2rem .5rem; font-size: .8rem; }
+button.ghost:hover, a.button.ghost:hover { border-color: var(--accent-dim); }
+button.small, a.button.small { padding: .2rem .5rem; font-size: .8rem; }
 button.link { background: none; border: none; color: var(--info); cursor: pointer; padding: 0;
   font: inherit; text-decoration: underline; }
 
@@ -243,3 +243,21 @@ button.ghost:disabled:hover { border-color: var(--line); }
 .notice pre.cmd { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
   padding: .5rem .7rem; margin: .6rem 0 0; font-family: var(--mono); font-size: .78rem;
   overflow-x: auto; white-space: pre; }
+
+/* video library */
+td.actions { white-space: nowrap; text-align: right; }
+td.actions > * { margin-left: .3rem; }
+a.button { display: inline-block; text-decoration: none; color: var(--text); }
+button.danger:hover { border-color: var(--bad); color: var(--bad); }
+button.small.primary { padding: .2rem .6rem; }
+.session-link { margin-right: .5rem; font-family: var(--mono); font-size: .8rem; }
+
+/* login */
+body.login-page { display: grid; place-items: center; padding: 1rem; }
+form.login { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: .6rem; }
+form.login .brand { margin-bottom: .4rem; }
+form.login label { font-size: .8rem; color: var(--muted); }
+form.login input { width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: .5rem .6rem; font: inherit; }
+form.login .status { min-height: 1.2em; margin: 0; }
+.topbar .meta button { margin-left: .6rem; font-family: inherit; }

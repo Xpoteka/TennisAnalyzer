@@ -166,6 +166,24 @@ COMMANDS: tuple[Command, ...] = (
         produces="trends",
     ),
     Command(
+        "relink",
+        "Relink moved videos",
+        "Pipeline",
+        "Point sessions whose raw video is gone at a file of the same name, e.g. after copying "
+        "the data folder to a server. Looks in the uploads folder unless you give another one.",
+        (
+            Field(
+                "dir",
+                "Look in folder",
+                "text",
+                "--dir",
+                placeholder="<data root>/uploads",
+                help="A folder on the server that holds the videos.",
+            ),
+            Field("dry_run", "Only show what would change", "bool", "--dry-run"),
+        ),
+    ),
+    Command(
         "players",
         "Who is who",
         "Review",

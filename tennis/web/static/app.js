@@ -25,6 +25,10 @@ const mount = (el, ...kids) => { el.append(...kids.filter(Boolean)); return el; 
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
+  if (res.status === 401 && S.meta && S.meta.auth) {
+    location.href = '/login';  // the login expired, or the password changed
+    throw new Error('log in again');
+  }
   const text = await res.text();
   let body = {};
   try { body = text ? JSON.parse(text) : {}; } catch { body = { error: text.slice(0, 400) }; }
@@ -85,8 +89,8 @@ const STAGE_ABBR = {
 };
 
 const VIEWS = [
-  ['analyze', 'Analyse'], ['sessions', 'Sessions'], ['commands', 'All commands'],
-  ['config', 'Config'],
+  ['analyze', 'Analyse'], ['videos', 'Videos'], ['sessions', 'Sessions'],
+  ['commands', 'All commands'], ['config', 'Config'],
 ];
 
 function setView(name) {
@@ -94,13 +98,15 @@ function setView(name) {
   for (const [id] of VIEWS) $(`#view-${id}`).classList.toggle('on', id === name);
   for (const b of $('#nav').children) b.classList.toggle('on', b.dataset.view === name);
   location.hash = name === 'sessions' && S.sel ? `sessions/${S.sel}` : name;
+  if (name === 'videos') refreshVideos();
 }
 
 /* ---------- boot ---------- */
 
 async function boot() {
   S.meta = await api('/api/meta');
-  $('#topmeta').textContent = `v${S.meta.version} · ${S.meta.data_root}`;
+  mount(clear($('#topmeta')), `v${S.meta.version} · ${S.meta.data_root}`,
+    S.meta.auth ? h('button', { class: 'ghost small', onclick: logout }, 'Log out') : null);
   $('#uploads-dir').textContent = S.meta.uploads_dir;
 
   clear($('#nav')).append(...VIEWS.map(([id, label]) =>
@@ -128,7 +134,15 @@ async function boot() {
   } else setView('analyze');
 
   setInterval(pollJobs, 1500);
-  setInterval(() => { if (S.view === 'sessions' || S.view === 'analyze') refreshSessions(); }, 8000);
+  setInterval(() => {
+    if (S.view === 'sessions' || S.view === 'analyze') refreshSessions();
+    if (S.view === 'videos') refreshVideos();
+  }, 8000);
+}
+
+async function logout() {
+  try { await postJSON('/api/logout', {}); } catch { /* going to the login page anyway */ }
+  location.href = '/login';
 }
 
 /* ---------- forms built from the command catalogue ---------- */
@@ -219,23 +233,72 @@ function commandCard(cmd) {
 
 /* ---------- uploads ---------- */
 
-function upload(file, kind, onProgress) {
+/* Files go up in pieces, and the server keeps what arrived. A dropped connection, a proxy
+   timeout or a closed tab only costs the piece in flight: the upload asks the server how
+   much it has and carries on from there, now or when the same file is dropped again. */
+const PIECE = 32 * 1024 * 1024;  // under the 100 MB request limit of tunnels like Cloudflare's
+const MAX_RETRIES = 8;
+let uploading = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function upload(file, kind, onProgress) {
+  const q = `kind=${kind}&name=${encodeURIComponent(file.name)}&size=${file.size}`;
+  uploading++;
+  try {
+    let state = null;
+    let failures = 0;
+    while (!state || !state.done) {
+      try {
+        if (!state) state = await api(`/api/upload?${q}`);
+        if (state.done) break;
+        const offset = state.received;
+        onProgress(offset / file.size);
+        const piece = file.slice(offset, Math.min(offset + PIECE, file.size));
+        state = await sendPiece(`/api/upload?${q}&offset=${offset}`, piece,
+          (loaded) => onProgress((offset + loaded) / file.size));
+        failures = 0;
+      } catch (e) {
+        if (e.received !== undefined) {  // the server has a different amount: go on from it
+          state = { done: false, received: e.received };
+          continue;
+        }
+        if (e.fatal || ++failures > MAX_RETRIES) throw e;
+        state = null;  // ask again how much arrived
+        await sleep(Math.min(30000, 1000 * 2 ** failures));
+      }
+    }
+    onProgress(1);
+    return state;
+  } finally {
+    uploading--;
+  }
+}
+
+function sendPiece(url, piece, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST',
-      `/api/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`);
+    xhr.open('POST', url);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
     xhr.onload = () => {
       let body = {};
       try { body = JSON.parse(xhr.responseText); } catch { body = {}; }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-      else reject(new Error(body.error || `upload failed (${xhr.status})`));
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(body);
+      if (xhr.status === 401) { location.href = '/login'; }
+      const err = new Error(body.error || `upload failed (${xhr.status})`);
+      if (xhr.status === 409 && typeof body.received === 'number') err.received = body.received;
+      // Proxies answer 502-504 when the server is busy or restarting: worth another try.
+      else if (xhr.status < 500 || xhr.status === 507) err.fatal = true;
+      reject(err);
     };
     xhr.onerror = () => reject(new Error('upload failed: the connection dropped'));
-    xhr.send(file);
+    xhr.send(piece);
   });
 }
+
+window.addEventListener('beforeunload', (e) => {
+  if (uploading) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function pickAndUpload(then) {
   const input = h('input', { type: 'file' });
@@ -293,7 +356,7 @@ function wireDropzone() {
 
   $('#path-go').onclick = () => {
     const path = $('#path-input').value.trim();
-    if (!path) return toast('Give the path of a video on this machine', 'bad');
+    if (!path) return toast('Give the path of a video on the server', 'bad');
     startJob('process', { ...S.processOpts, video_path: path });
   };
 }
@@ -313,7 +376,8 @@ async function handleVideo(file) {
   try {
     const r = await upload(file, 'video', show);
     show(1);
-    pct.textContent = r.reused ? 'already uploaded' : 'uploaded';
+    pct.textContent = r.reused ? 'already on the server' : 'uploaded';
+    refreshVideos();
     await startJob('process', { ...S.processOpts, video_path: r.path });
   } catch (e) {
     toast(e.message, 'bad');
@@ -371,6 +435,7 @@ async function pollJobs() {
       toast(j.state === 'done' ? `Finished: ${j.title}` : `Failed: ${j.title} (exit ${j.returncode})`,
             j.state === 'done' ? 'ok' : 'bad');
       refreshSessions(true);
+      if (S.view === 'videos') refreshVideos();
       if (S.sel && (j.session_id === S.sel || !j.session_id)) selectSession(S.sel, true);
     }
   }
@@ -405,6 +470,87 @@ async function pollJobLines(id) {
       ? h('button', { class: 'ghost small', onclick: () => { refreshSessions(); setView('sessions'); } },
           'See sessions')
       : null);
+}
+
+/* ---------- videos ---------- */
+
+async function refreshVideos() {
+  let lib;
+  try { lib = await api('/api/videos'); } catch (e) { return; }
+  const signature = JSON.stringify(lib);
+  if (signature === S.videoSignature) return;  // keep a click or a scroll position intact
+  S.videoSignature = signature;
+  renderVideos(lib);
+}
+
+function renderVideos(lib) {
+  const root = clear($('#video-library'));
+  const disk = lib.disk;
+  root.append(h('div', { class: 'panel' },
+    h('h2', {}, 'Videos on the server ',
+      h('span', { class: 'muted' }, `${lib.videos.length} · ${bytes(disk.free)} free of ${bytes(disk.total)}`)),
+    h('p', { class: 'hint' },
+      'Every uploaded video is kept, so a session can be rerun without sending the file again. ',
+      'Files copied into ', h('code', {}, lib.dir),
+      ' by other means, such as a network share, show up here too.')));
+
+  if (lib.partial.length) {
+    root.append(h('div', { class: 'notice' },
+      h('b', {}, 'Unfinished uploads. '),
+      'Drop the same file on the Analyse page to carry on where it stopped.',
+      h('table', {}, h('tbody', {}, ...lib.partial.map((p) => h('tr', {},
+        h('td', {}, p.name),
+        h('td', { class: 'num' }, `${bytes(p.received)} of ${bytes(p.size)}`),
+        h('td', { class: 'num' }, `${Math.floor((100 * p.received) / p.size)}%`),
+        h('td', { class: 'num' }, h('button', { class: 'ghost small',
+          onclick: () => discardUpload(p) }, 'Discard'))))))));
+  }
+
+  if (!lib.videos.length) {
+    root.append(h('div', { class: 'panel' }, h('p', { class: 'empty' },
+      'No videos yet. Drop one on the Analyse page.')));
+    return;
+  }
+  root.append(h('div', { class: 'panel' }, h('div', { class: 'scroll' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'video'), h('th', { class: 'num' }, 'size'),
+      h('th', {}, 'added'), h('th', {}, 'sessions'), h('th', {}, ''))),
+    h('tbody', {}, ...lib.videos.map((v) => h('tr', {},
+      h('td', {}, v.name),
+      h('td', { class: 'num' }, bytes(v.size)),
+      h('td', { class: 'muted' }, new Date(v.modified * 1000).toLocaleString()),
+      h('td', {}, v.sessions.length
+        ? v.sessions.map((sid) => h('button', { class: 'link session-link',
+            onclick: () => { selectSession(sid); setView('sessions'); } }, sid))
+        : h('span', { class: 'muted' }, 'not analysed')),
+      h('td', { class: 'actions' },
+        h('button', { class: v.sessions.length ? 'ghost small' : 'primary small',
+          title: `tennis process ${v.path}`,
+          onclick: () => startJob('process', { ...S.processOpts, video_path: v.path }) },
+          v.sessions.length ? 'Run again' : 'Analyse'),
+        h('a', { class: 'button ghost small', href: v.url, download: v.name }, 'Download'),
+        h('button', { class: 'ghost small danger', onclick: () => deleteVideo(v) },
+          'Delete')))))))));
+}
+
+async function deleteVideo(v) {
+  const used = v.sessions.length
+    ? `\n\nIt is used by ${v.sessions.join(', ')}. Their results stay, but they cannot be `
+      + 'rerun until the video is uploaded again.'
+    : '';
+  if (!confirm(`Delete ${v.name} (${bytes(v.size)}) from the server for good?${used}`)) return;
+  try {
+    await postJSON('/api/videos/delete', { name: v.name });
+    toast(`Deleted ${v.name}`, 'ok');
+    refreshVideos();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+async function discardUpload(p) {
+  if (!confirm(`Throw away the ${bytes(p.received)} already uploaded of ${p.name}?`)) return;
+  try {
+    await postJSON(`/api/upload/discard?kind=video&name=${encodeURIComponent(p.name)}&size=${p.size}`, {});
+    refreshVideos();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 /* ---------- sessions ---------- */
@@ -580,8 +726,15 @@ function unfinishedNotice(d) {
     return h('div', { class: 'notice bad' },
       h('b', {}, 'The video for this session is missing. '),
       d.source_path
-        ? `${d.source_path} cannot be read; nothing can be reprocessed until it is back.`
-        : 'The session has no source.* link, so there is nothing to process.');
+        ? `${d.source_path} cannot be read; nothing can be reprocessed until it is back. `
+          + 'If the data folder was moved here from another machine, put the video in '
+          + `${S.meta.uploads_dir} and relink it.`
+        : 'The session has no source.* link, so there is nothing to process.',
+      d.source_path
+        ? h('div', { class: 'row' },
+            h('button', { class: 'ghost', onclick: () => startJob('relink', {}) },
+              'Relink moved videos'))
+        : null);
   }
   if (!pending.length) return null;
   const last = [...d.stages].reverse().find((s) => done.has(s.name));

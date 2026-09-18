@@ -1,0 +1,16 @@
+# TrueNAS: Apps → Discover Apps → ⋮ → Install via YAML. Name it "tennis", paste this, and
+# change the two values marked CHANGE. See docs/DEPLOY.md.
+services:
+  tennis:
+    image: ghcr.io/xpoteka/tennisanalyzer:latest
+    pull_policy: always          # restarting the app picks up the newest image
+    restart: unless-stopped
+    ports:
+      - "8731:8731"
+    environment:
+      # CHANGE: your login password, at least 10 characters. Left empty, the app will not start.
+      TENNIS_UI_PASSWORD: ""
+    volumes:
+      # CHANGE: the dataset for sessions, uploaded videos and models. The "apps" user
+      # (uid 568) needs read and write access to it.
+      - /mnt/tank/tennis-data:/data
