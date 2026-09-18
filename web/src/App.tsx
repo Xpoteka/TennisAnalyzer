@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api, onUnauthorized } from "./api";
 import JobsIndicator from "./components/JobsIndicator";
+import UploadIndicator from "./components/UploadIndicator";
 import Login from "./pages/Login";
 import PlayerPage from "./pages/PlayerPage";
 import PlayersPage from "./pages/PlayersPage";
@@ -9,6 +10,7 @@ import SessionPage from "./pages/SessionPage";
 import SessionsPage from "./pages/SessionsPage";
 import SettingsPage from "./pages/SettingsPage";
 import UploadPage from "./pages/UploadPage";
+import { restoreUploads } from "./uploadStore";
 
 type AuthState = "checking" | "in" | "out";
 
@@ -27,6 +29,10 @@ export default function App() {
     return onUnauthorized(() => setAuth("out"));
   }, []);
 
+  useEffect(() => {
+    if (auth === "in") restoreUploads();
+  }, [auth]);
+
   if (auth === "checking") return null;
   if (auth === "out") return <Login onLogin={() => setAuth("in")} />;
 
@@ -44,6 +50,7 @@ export default function App() {
           <NavLink to="/settings">Settings</NavLink>
         </nav>
         <div className="topbar-right">
+          <UploadIndicator />
           <JobsIndicator />
           {needsPassword && (
             <button

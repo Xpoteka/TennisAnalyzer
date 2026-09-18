@@ -7,6 +7,17 @@ const PIECE = 32 * 1024 * 1024;
 
 type Status = { done: boolean; received: number; size: number; path?: string };
 
+const query = (name: string, size: number) =>
+  `/api/uploads?name=${encodeURIComponent(name)}&size=${size}`;
+
+/** How much of this file the server already has. */
+export const uploadStatus = (name: string, size: number) =>
+  request<Status>("GET", query(name, size));
+
+/** Delete what arrived of an unfinished upload. */
+export const discardUpload = (name: string, size: number) =>
+  request("DELETE", query(name, size));
+
 export type UploadProgress = { sent: number; size: number; rate: number };
 
 export async function uploadFile(
@@ -14,9 +25,8 @@ export async function uploadFile(
   onProgress: (p: UploadProgress) => void,
   signal?: AbortSignal,
 ): Promise<string> {
-  const q = (extra = "") =>
-    `/api/uploads?name=${encodeURIComponent(file.name)}&size=${file.size}${extra}`;
-  let status = await request<Status>("GET", q());
+  const q = (extra = "") => query(file.name, file.size) + extra;
+  let status = await uploadStatus(file.name, file.size);
   const started = performance.now();
   const startOffset = status.received;
   while (!status.done) {

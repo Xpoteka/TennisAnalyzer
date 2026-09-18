@@ -2,7 +2,9 @@
 
 Frames come from an ``ffmpeg`` subprocess (raw BGR on stdout). The ``showinfo`` filter
 reports each frame's PTS on stderr, which is matched to the frame index from
-``frame_times.parquet``. Only one frame is held in memory at a time. ffmpeg applies the
+``frame_times.parquet``. The PTS is taken as the integer ``pts`` times the filter's time base:
+FFmpeg before 7.0 prints ``pts_time`` with only six significant digits, which past 1000 s is
+too coarse to identify a frame. Only one frame is held in memory at a time. ffmpeg applies the
 container's rotation, so frames arrive upright.
 
 PyAV is not used because on macOS it bundles an FFmpeg that clashes with OpenCV's.
@@ -23,7 +25,8 @@ import numpy.typing as npt
 
 from tennis.util.video import ProbeError, require_tool
 
-_SHOWINFO_RE = re.compile(r"\bn:\s*\d+\s+pts:\s*-?\d+\s+pts_time:\s*(-?[0-9.eE+-]+)")
+_SHOWINFO_RE = re.compile(r"\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:\s*(-?[0-9.eE+-]+)")
+_TIME_BASE_RE = re.compile(r"\bconfig in time_base:\s*(\d+)/(\d+)")
 PTS_TOLERANCE_S = 0.001
 _STDERR_TAIL = 20
 
@@ -148,11 +151,12 @@ class FrameReader:
         tail: list[str] = []
 
         def pump(stream: object) -> None:
+            parser = ShowinfoParser()
             for raw in iter(stream.readline, b""):  # type: ignore[attr-defined]
                 line = raw.decode("utf-8", "replace")
-                match = _SHOWINFO_RE.search(line)
-                if match:
-                    pts_queue.put(float(match.group(1)))
+                pts = parser.feed(line)
+                if pts is not None:
+                    pts_queue.put(pts)
                 elif line.strip():
                     tail.append(line.strip())
                     del tail[:-_STDERR_TAIL]
@@ -192,6 +196,26 @@ class FrameReader:
         if i >= self.frame_pts.size or abs(self.frame_pts[i] - pts) > PTS_TOLERANCE_S:
             raise ProbeError(f"decoded frame at {pts:.6f}s is not in frame_times.parquet")
         return i
+
+
+class ShowinfoParser:
+    """Frame PTS from ``showinfo`` log lines, exact to the stream's time base."""
+
+    def __init__(self) -> None:
+        self.time_base: tuple[int, int] | None = None
+
+    def feed(self, line: str) -> float | None:
+        """The PTS in seconds if ``line`` describes a frame, else ``None``."""
+        match = _SHOWINFO_RE.search(line)
+        if match is None:
+            tb = _TIME_BASE_RE.search(line)
+            if tb and int(tb.group(1)) > 0 and int(tb.group(2)) > 0:
+                self.time_base = (int(tb.group(1)), int(tb.group(2)))
+            return None
+        if self.time_base is None:
+            return float(match.group(2))
+        num, den = self.time_base
+        return int(match.group(1)) * num / den
 
 
 def _read_exact(stream: object, size: int) -> bytes | None:
