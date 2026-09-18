@@ -53,9 +53,11 @@ class AudioConfig(_Section):
 class PoseConfig(_Section):
     backend: str = Field("yolo", min_length=1)  # checked against the backend registry
     model: str = "yolo11m-pose.pt"
+    # Person detector for small far players (their pose comes from an enlarged crop).
+    detector_model: str = "yolo11s.pt"
     device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     batch_size: int = Field(16, ge=1)
-    imgsz: int = Field(960, ge=32)
+    imgsz: int = Field(640, ge=32)
     min_person_conf: float = Field(0.2, ge=0, le=1)
     kp_conf_min: float = Field(0.3, ge=0, le=1)
     # Frames per second analysed for tracking people over the whole video.
@@ -64,7 +66,7 @@ class PoseConfig(_Section):
 
 class CourtConfig(_Section):
     frames: int = Field(24, ge=1)  # frames sampled across the video for calibration
-    min_quality: float = Field(0.5, ge=0, le=1)  # below this, no court: ball stats are skipped
+    min_quality: float = Field(0.6, ge=0, le=1)  # below this, no court: ball stats are skipped
     # Manual corners, as fractions of the frame, in the order far-left, far-right,
     # near-right, near-left (doubles court). Overrides detection for every video when set.
     manual_corners: list[tuple[float, float]] | None = None

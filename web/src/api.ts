@@ -31,6 +31,7 @@ export type Video = {
   warnings: string[];
   proxy_url: string | null;
   proxy_start_pts: number | null;
+  court_image_url: string | null;
 };
 
 export type SessionPlayer = {

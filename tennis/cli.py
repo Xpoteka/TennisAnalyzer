@@ -134,6 +134,29 @@ def analyze(
     print(f"session {session_id} ready")
 
 
+@app.command()
+def review(
+    video_id: int,
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    start: Annotated[float, typer.Option(help="Seconds from the start of the video")] = 0.0,
+    duration: Annotated[float, typer.Option(help="Seconds to render")] = 30.0,
+) -> None:
+    """Draw the court, players, ball and sound onsets over part of a video."""
+    from tennis.db import session_scope
+    from tennis.db.models import Video
+    from tennis.pipeline import video_source
+    from tennis.review import render
+
+    _cfg, root = _load(config, data_root)
+    with session_scope(root) as db:
+        row = db.get(Video, video_id)
+        if row is None:
+            raise UserError(f"no video {video_id}")
+        source = video_source(root, row.path)
+    print(render(root, video_id, source, start, duration))
+
+
 @app.command("run-job", hidden=True)
 def run_job(job_id: int, config: ConfigOpt = None, data_root: DataRootOpt = None) -> None:
     """Run one queued job (the worker starts this in a subprocess)."""

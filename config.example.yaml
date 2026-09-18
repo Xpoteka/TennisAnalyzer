@@ -29,16 +29,17 @@ audio:
 pose:
   backend: yolo
   model: yolo11m-pose.pt      # downloaded into <data_root>/models on first use
+  detector_model: yolo11s.pt  # finds small far players; their pose comes from a zoomed crop
   device: auto                # auto | cuda | mps | cpu
   batch_size: 16
-  imgsz: 960
+  imgsz: 640
   min_person_conf: 0.2
   kp_conf_min: 0.3
   sample_fps: 10.0            # frames per second analysed to track people
 
 court:
   frames: 24                  # frames sampled across each video to find the court
-  min_quality: 0.5            # below this the court counts as not found: no ball stats
+  min_quality: 0.6            # below this the court counts as not found: no ball stats
   # Court corners by hand, as fractions of the frame, when detection fails:
   # [[x, y] far-left, far-right, near-right, near-left] of the doubles court.
   manual_corners: null

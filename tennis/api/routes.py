@@ -75,6 +75,11 @@ def _video_json(v: Video, data_root: Path) -> dict[str, Any]:
         "error": v.error,
         "warnings": v.warnings,
         "proxy_url": f"/api/videos/{v.id}/proxy" if start_pts is not None else None,
+        "court_image_url": (
+            f"/api/media/videos/{v.id}/court.jpg"
+            if (video_dir(data_root, v.id or 0) / "court.jpg").is_file()
+            else None
+        ),
         "proxy_start_pts": start_pts,
     }
 

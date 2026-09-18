@@ -79,14 +79,30 @@ class FrameReader:
         height: int,
         video_start_s: float = 0.0,
         hwaccel: str | None = None,
+        *,
+        every: int = 1,
+        out_width: int | None = None,
     ) -> None:
+        """``every``: keep one frame in this many. ``out_width``: scale frames to this width
+        (the height follows, rounded to an even number)."""
         self.path = path
         self.frame_pts = frame_pts
-        self.width = width
-        self.height = height
+        self.src_width = width
+        self.src_height = height
+        self.every = max(1, every)
+        if out_width is not None and out_width < width:
+            self.width = out_width - out_width % 2
+            self.height = round(height * self.width / width / 2) * 2
+        else:
+            self.width, self.height = width, height
         self.video_start_s = video_start_s
         self.hwaccel = hwaccel
         self._ffmpeg = require_tool("ffmpeg")
+
+    @property
+    def scale(self) -> float:
+        """Output pixels per source pixel."""
+        return self.width / self.src_width
 
     def _command(self, start_pts: float) -> list[str]:
         cmd = [self._ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info"]
@@ -99,13 +115,22 @@ class FrameReader:
             "-i", str(self.path),
             "-map", "0:v:0",
             "-an", "-sn", "-dn",
-            "-vf", "showinfo",
+            "-vf", self._filters(),
             "-fps_mode", "passthrough",
             "-pix_fmt", "bgr24",
             "-f", "rawvideo",
             "-",
         ]  # fmt: skip
         return cmd
+
+    def _filters(self) -> str:
+        chain = []
+        if self.every > 1:
+            chain.append(f"select='not(mod(n\\,{self.every}))'")
+        if (self.width, self.height) != (self.src_width, self.src_height):
+            chain.append(f"scale={self.width}:{self.height}:flags=area")
+        chain.append("showinfo")
+        return ",".join(chain)
 
     def read(self, windows: Sequence[Window]) -> Iterator[Frame]:
         """Frames inside ``windows`` (sorted, non-overlapping), decoded in a single pass."""

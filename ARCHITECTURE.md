@@ -50,7 +50,27 @@ Every output must also still exist.
 | Stage | Writes | Notes |
 |---|---|---|
 | ingest | `metadata.json`, `frame_times.parquet`, `audio.wav` (if the video has sound) | Frame times are **PTS seconds**; frame index `i` = row `i`. `audio.wav` sample 0 is at PTS `audio_start_s`. |
+| audio | `onsets.parquet`, `envelope.npy` | Impact onsets (PTS) from `util/audio.py`. The 200 Hz onset envelope is for syncing several videos. |
 | proxy | `proxy.mp4`, `proxy.json` | Browser-playable H.264. A source that already plays is symlinked instead. Proxy time = PTS − `start_pts`. |
+| court | `court.json`, `court.jpg` | Court and camera from the median of 24 frames (`vision/court.py`). `found: false` when it does not fit or the view is too low. |
+| people | `people.parquet` | YOLO pose at ~10 fps over the whole video, feet on court in metres, clothing colour, `track_id`. Far players come from a detector on an enlarged crop of the far half, with pose from a tight zoomed crop. |
+| ball | `ball.parquet` | Every frame: three-frame motion blobs scored for ball colour and shape, linked into tracklets (`vision/ball.py`). |
+
+### Court and camera (`tennis/vision/court.py`)
+
+Court metres: origin at the centre of the net, `x` across (right as seen from the near baseline), `y` along (towards the far baseline, the one higher in the image), `z` up.
+
+1. **Background.** The white-line mask comes from a top-hat filter plus low saturation, taken on the median background.
+2. **Search.** For each of five lens distortions, the image is straightened and Hough lines are found. Every pair of "across" lines and pair of "along" lines is then matched to every ordered pair of court lines, which gives a homography. Each one is scored by the **distinct** line pixels the projected court explains. Counting distinct pixels stops a court squeezed onto one line from winning.
+3. **Refinement.** Least squares on the distance transform, with two radial distortion terms. A weak prior on the corners stops it from collapsing.
+4. **Camera.** Focal length, rotation and position follow from the homography: principal point at the centre, square pixels. They are then refined against the court lines and the **net tape**, which is at a known height. The court alone cannot separate a longer lens from a camera further away; the net can.
+5. **Rejection.** A fit is not a court when:
+   - quality (the share of visible line samples on white) is below `court.min_quality`;
+   - the outline covers under 5% of the frame or under 15% of its height;
+   - the lens model folds over (distortion must grow with radius);
+   - the camera is not 1–40 m above the court and looking down at 6° or more.
+
+   A camera at court level (the DJI session) is rejected this way.
 
 **Session stages** combine every finished video of a session and write to the database. They are cheap and always run.
 

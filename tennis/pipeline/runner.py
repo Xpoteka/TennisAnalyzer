@@ -85,6 +85,8 @@ def analyze_session(
                     done += stage.weight
                     if stage.name == "ingest":
                         _store_metadata(data_root, row.id, read_json(ctx.path("metadata.json")))
+                    elif stage.name == "court":
+                        _store_court(data_root, row.id, read_json(ctx.path("court.json")))
                 meta = read_json(directory / "metadata.json")
                 finished.append(
                     VideoInfo(
@@ -155,6 +157,26 @@ def _store_metadata(data_root: Path, video_id: int, meta: dict[str, object]) -> 
         recorded_at=datetime.fromisoformat(created) if isinstance(created, str) else None,
         warnings=list(meta.get("warnings") or []),  # type: ignore[call-overload]
     )
+
+
+def _store_court(data_root: Path, video_id: int, court: dict[str, object]) -> None:
+    quality = court.get("quality")
+    _set_video(
+        data_root,
+        video_id,
+        court=court if court.get("found") else None,
+        court_quality=float(quality) if isinstance(quality, int | float) else 0.0,
+    )
+    if not court.get("found"):
+        with session_scope(data_root) as db:
+            row = db.get(Video, video_id)
+            if row is not None:
+                note = (
+                    "the court is not fully visible, so ball speed, height and placement "
+                    f"are not measured ({court.get('reason')})"
+                )
+                row.warnings = [w for w in row.warnings if not w.startswith("the court")] + [note]
+                db.add(row)
 
 
 def _finish(data_root: Path, session_id: int, status: str, error: str | None) -> None:

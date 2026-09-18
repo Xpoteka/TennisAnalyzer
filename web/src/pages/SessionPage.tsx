@@ -549,6 +549,14 @@ function Videos({
                 </td>
                 <td className="small">
                   {v.court_quality == null ? "—" : v.has_court ? `found (${pct(v.court_quality)})` : "not visible"}
+                  {v.court_image_url && (
+                    <>
+                      {" · "}
+                      <a href={v.court_image_url} target="_blank" rel="noreferrer">
+                        view
+                      </a>
+                    </>
+                  )}
                 </td>
                 <td className="small">{v.error ? <span style={{ color: "var(--danger)" }}>{v.error}</span> : v.status}</td>
                 <td className="num">

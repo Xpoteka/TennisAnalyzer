@@ -13,14 +13,20 @@ Session stages are cheap and always run.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
+import pyarrow.parquet as pq
+
 from tennis import __version__
 from tennis.config import Config
+from tennis.util.frames import FrameReader, Window
 from tennis.util.io import read_json, write_json
 from tennis.util.log import log
 
@@ -85,6 +91,36 @@ class VideoContext:
     def metadata(self) -> dict[str, Any]:
         data: dict[str, Any] = read_json(self.path("metadata.json"))
         return data
+
+    def frame_pts(self) -> npt.NDArray[np.float64]:
+        table = pq.read_table(self.path("frame_times.parquet"), columns=["pts"])
+        return np.asarray(table.column("pts").to_numpy(), np.float64)
+
+    def frame_size(self) -> tuple[int, int]:
+        """Width and height of frames as decoded (ffmpeg applies the rotation)."""
+        meta = self.metadata()
+        w, h = int(meta["width"]), int(meta["height"])
+        if int(meta["video"].get("rotation_deg") or 0) % 180 == 90:
+            w, h = h, w
+        return w, h
+
+    def frame_reader(self, *, every: int = 1, out_width: int | None = None) -> FrameReader:
+        meta = self.metadata()
+        w, h = self.frame_size()
+        return FrameReader(
+            self.source,
+            self.frame_pts(),
+            w,
+            h,
+            float(meta.get("video_start_s") or 0.0),
+            hwaccel="videotoolbox" if sys.platform == "darwin" else None,
+            every=every,
+            out_width=out_width,
+        )
+
+    def whole_video(self) -> list[Window]:
+        pts = self.frame_pts()
+        return [Window(0, float(pts[0]), float(pts[-1]))]
 
 
 @dataclass(frozen=True)
