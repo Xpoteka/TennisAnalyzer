@@ -54,6 +54,7 @@ class Detector:
             device=self.device,
             batch=len(frames),
             verbose=False,
+            quantize=16 if self.device in ("cuda", "mps") else None,
         )
         out: list[list[Box]] = []
         for r in results:
