@@ -1,17 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, type PlayerDetail } from "../api";
+import { api } from "../api";
+import Sparkline from "../components/Sparkline";
 import { Avatar, KindBadge } from "../components/Badges";
 import { STROKE_LABELS, formatDate, sessionTitle } from "../format";
 import { useData } from "../hooks";
-
-type Technique = {
-  insights?: { text: string; level: "good" | "info" | "work" }[];
-  metrics?: Record<
-    string,
-    Record<string, { label: string; unit: string; median: number; spread: number; n: number; trend?: number }>
-  >;
-};
 
 export default function PlayerPage() {
   const id = Number(useParams().id);
@@ -26,7 +19,9 @@ export default function PlayerPage() {
   if (!p) return null;
   if (p.id !== id) navigate(`/players/${p.id}`, { replace: true }); // merged away
 
-  const technique = (p as PlayerDetail & { technique?: Technique }).technique;
+  const profile = p.profile ?? { by_stroke: {}, technique: {}, trend: [], insights: [] };
+  const strokes = Object.entries(profile.by_stroke);
+  const trend = profile.trend;
 
   return (
     <div className="stack" style={{ gap: 24 }}>
@@ -130,12 +125,53 @@ export default function PlayerPage() {
           ))}
       </div>
 
+      {strokes.length > 0 && (
+        <section className="stack">
+          <h2>Strokes</h2>
+          <div className="card table-wrap" style={{ padding: 0 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Stroke</th>
+                  <th className="num">Shots</th>
+                  <th className="num">Speed km/h</th>
+                  <th className="num">Top</th>
+                  <th className="num">In</th>
+                  <th className="num">Over net m</th>
+                  <th className="num">Contact height m</th>
+                  <th className="num">Knee angle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strokes.map(([k, v]) => (
+                  <tr key={k}>
+                    <td>{STROKE_LABELS[k] ?? k}</td>
+                    <td className="num">{v.count}</td>
+                    <td className="num">{v.speed_avg ?? "—"}</td>
+                    <td className="num">{v.speed_max ?? "—"}</td>
+                    <td className="num">{v.in_pct != null ? `${Math.round(v.in_pct * 100)}%` : "—"}</td>
+                    <td className="num">{v.net_clearance_avg ?? "—"}</td>
+                    <td className="num">{v.contact_height_m ?? "—"}</td>
+                    <td className="num">
+                      {v.technique.knee_bend_deg != null ? `${Math.round(v.technique.knee_bend_deg)}°` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="small muted">
+            Speed, height over the net and in/out only count shots whose ball flight could be measured.
+          </div>
+        </section>
+      )}
+
       <section className="stack">
         <h2>Technique</h2>
-        {technique?.insights?.length ? (
+        {profile.insights.length ? (
           <div className="card stack" style={{ gap: 8 }}>
-            {technique.insights.map((i, n) => (
-              <div key={n} className="row" style={{ alignItems: "flex-start", gap: 10 }}>
+            {profile.insights.map((i, n) => (
+              <div key={n} className="row" style={{ alignItems: "flex-start", gap: 10, flexWrap: "nowrap" }}>
                 <span className={`badge ${i.level === "good" ? "badge-training" : i.level === "work" ? "badge-busy" : ""}`}>
                   {i.level === "good" ? "Strength" : i.level === "work" ? "Work on" : "Note"}
                 </span>
@@ -149,7 +185,51 @@ export default function PlayerPage() {
             here after a session with this player has been analysed.
           </div>
         )}
+        <div className="kpis">
+          {Object.entries(profile.technique)
+            .filter(([, t]) => t.median != null)
+            .map(([name, t]) => (
+              <div className="kpi" key={name}>
+                <div className="kpi-label">{t.label}</div>
+                <div className="kpi-value" style={{ fontSize: 20 }}>
+                  {name === "split_step"
+                    ? `${Math.round((t.median ?? 0) * 100)}%`
+                    : name === "shoulder_turn"
+                      ? (t.median ?? 0).toFixed(2)
+                      : `${(t.median ?? 0).toFixed(name.endsWith("_deg") ? 0 : 1)}${t.unit === "°" ? "°" : ""}`}
+                  {t.unit && t.unit !== "°" && <span className="small muted"> {t.unit}</span>}
+                </div>
+                <div className="kpi-sub">from {t.n} shots</div>
+              </div>
+            ))}
+        </div>
       </section>
+
+      {trend.length > 0 && (
+        <section className="stack">
+          <h2>Over time</h2>
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+            {(
+              [
+                ["Forehand speed (km/h)", trend.map((t) => t.forehand_kmh), (v: number) => v.toFixed(0)],
+                ["Backhand speed (km/h)", trend.map((t) => t.backhand_kmh), (v: number) => v.toFixed(0)],
+                ["Serve speed (km/h)", trend.map((t) => t.serve_kmh), (v: number) => v.toFixed(0)],
+                ["Balls in", trend.map((t) => t.in_pct), (v: number) => `${Math.round(v * 100)}%`],
+                ["Knee angle at the load", trend.map((t) => t.knee_bend_deg), (v: number) => `${v.toFixed(0)}°`],
+                ["Split step", trend.map((t) => t.split_step_pct), (v: number) => `${Math.round(v * 100)}%`],
+              ] as [string, (number | null)[], (v: number) => string][]
+            ).map(([label, values, format]) => (
+              <div className="card stack" key={label} style={{ gap: 6 }}>
+                <div className="kpi-label">{label}</div>
+                <Sparkline values={values} format={format} />
+              </div>
+            ))}
+          </div>
+          {trend.length === 1 && (
+            <div className="small muted">One session so far: the trend lines grow with every session.</div>
+          )}
+        </section>
+      )}
 
       <section className="stack">
         <h2>Sessions</h2>

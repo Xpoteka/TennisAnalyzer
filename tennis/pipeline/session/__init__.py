@@ -69,11 +69,12 @@ class SessionStage:
 
 
 def _stages() -> tuple[SessionStage, ...]:
-    from tennis.pipeline.session import identities, match, shots, summary, timeline
+    from tennis.pipeline.session import identities, match, players, shots, summary, timeline
 
     return (
         SessionStage("timeline", timeline.run, title="Lining up the videos"),
         SessionStage("identities", identities.run, weight=0.3, title="Telling the players apart"),
+        SessionStage("players", players.run, weight=0.3, title="Recognising the players"),
         SessionStage("shots", shots.run, weight=1.0, title="Measuring every shot"),
         SessionStage("kind", match.run_kind, weight=0.05, title="Training or match?"),
         SessionStage("scoring", match.run_scoring, weight=0.1, title="Keeping score"),

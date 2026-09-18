@@ -11,6 +11,7 @@ Rows in the ``shot`` and ``rally`` tables for the session are replaced.
 
 from __future__ import annotations
 
+import itertools
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from sqlmodel import col, delete, select
 
+from tennis.analysis.technique import split_step, swing_metrics
 from tennis.db import session_scope
 from tennis.db.models import Player, Rally, SessionPlayer, Shot, ShotMetric
 from tennis.util.io import read_json
@@ -326,10 +328,9 @@ def run(ctx: SessionContext) -> None:
                     row["quality"]["flight_points"] = flight.n_obs
                     row["crosses_net"] = flight.crosses_net
             if sw is not None:
-                lw_speed = _racket_speed(sw)
-                if lw_speed is not None:
-                    row["metrics"]["racket_arm_speed"] = lw_speed
+                row["metrics"].update(swing_metrics(sw))
             shots.append(row)
+        add_movement_metrics(vd, [r for r in shots if r["video"] == vd.info.id])
 
     # Rallies, in time order across videos.
     shots.sort(key=lambda r: r["t"])
@@ -407,11 +408,51 @@ def run(ctx: SessionContext) -> None:
     )
 
 
-def _racket_speed(sw: Swing) -> float | None:
-    """Peak racket-wrist speed into contact, in body heights per second."""
-    from tennis.vision.strokes import wrist_peak_speeds
-
-    h = sw.body_height()
-    if not np.isfinite(h) or h <= 0:
-        return None
-    return round(max(wrist_peak_speeds(sw)) / h, 3)
+def add_movement_metrics(vd: VideoData, rows: list[dict[str, Any]]) -> None:
+    """Split step (as the opponent hits) and recovery (after one's own hit), per shot."""
+    m = pq.read_table(vd.info.path("motion.parquet")).to_pydict()
+    if not m["t"]:
+        return
+    track = np.asarray(m["track"])
+    t_all = np.asarray(m["t"], np.float64) + vd.info.offset_s
+    ky = np.asarray(m["kp_y"], np.float64)
+    kc = np.asarray(m["kp_c"], np.float64)
+    heights = np.asarray(m["height"], np.float64)
+    ankles = (ky[:, KP["l_ankle"]] + ky[:, KP["r_ankle"]]) / 2
+    ankles_ok = (kc[:, KP["l_ankle"]] >= 0.3) & (kc[:, KP["r_ankle"]] >= 0.3)
+    by_label: dict[str, np.ndarray] = {}
+    for label in set(vd.labels.values()):
+        sel = np.isin(track, [k for k, lab in vd.labels.items() if lab == label]) & ankles_ok
+        idx = np.nonzero(sel)[0]
+        by_label[label] = idx[np.argsort(t_all[idx])]
+    for prev, row in itertools.pairwise(rows):
+        label = row["label"]
+        if not label or prev["label"] in (None, label) or prev["rally_key"] != row["rally_key"]:
+            continue
+        found = by_label.get(label)
+        if found is None or not len(found):
+            continue
+        idx = found
+        t_o = prev["t"]
+        near = idx[(t_all[idx] >= t_o - 0.8) & (t_all[idx] <= t_o + 0.3)]
+        if len(near) < 8:
+            continue
+        value = split_step(ankles[near], t_all[near] - t_o, float(np.median(heights[near])))
+        if value is not None:
+            row["metrics"]["split_step"] = value
+    for row in rows:
+        label = row["label"]
+        if not label or vd.cal is None:
+            continue
+        tracks = [k for k, lab in vd.labels.items() if lab == label]
+        target = row["t"] - vd.info.offset_s + 1.2
+        best = None
+        for k in tracks:
+            tr = vd.tracks.get(k)
+            if tr is None or not len(tr["t"]):
+                continue
+            i = int(np.argmin(np.abs(tr["t"] - target)))
+            if abs(tr["t"][i] - target) <= 0.3 and np.isfinite(tr["x"][i]):
+                best = abs(float(tr["x"][i]))
+        if best is not None:
+            row["metrics"]["recovery_m"] = round(best, 2)

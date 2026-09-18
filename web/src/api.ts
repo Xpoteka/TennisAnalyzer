@@ -121,7 +121,39 @@ export type PlayerSummary = {
   last_seen: string | null;
 };
 
+export type StrokeProfile = {
+  count: number;
+  speed_avg: number | null;
+  speed_max: number | null;
+  n_speed: number;
+  in_pct: number | null;
+  net_clearance_avg: number | null;
+  contact_height_m: number | null;
+  technique: Record<string, number | null>;
+};
+
+export type TrendPoint = {
+  session_id: number;
+  recorded_at: string | null;
+  kind: SessionKind;
+  shots: number;
+  forehand_kmh: number | null;
+  backhand_kmh: number | null;
+  serve_kmh: number | null;
+  in_pct: number | null;
+  knee_bend_deg: number | null;
+  split_step_pct: number | null;
+};
+
+export type PlayerProfile = {
+  by_stroke: Record<string, StrokeProfile>;
+  technique: Record<string, { label: string; unit: string; median: number | null; n: number }>;
+  trend: TrendPoint[];
+  insights: { text: string; level: "good" | "info" | "work" }[];
+};
+
 export type PlayerDetail = PlayerSummary & {
+  profile: PlayerProfile;
   sessions: {
     session_id: number;
     name: string | null;

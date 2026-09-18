@@ -407,7 +407,7 @@ def _player_json(db: DbSession, p: Player, *, full: bool) -> dict[str, Any]:
     appearances = sorted(
         appearances, key=lambda r: (r[1].recorded_at or r[1].created_at).timestamp()
     )
-    shots = db.exec(select(Shot).where(Shot.player_id == p.id)).all()
+    shots = _playing(db, list(db.exec(select(Shot).where(Shot.player_id == p.id)).all()))
     by_stroke: dict[str, int] = {}
     for s in shots:
         by_stroke[s.stroke] = by_stroke.get(s.stroke, 0) + 1
@@ -435,7 +435,43 @@ def _player_json(db: DbSession, p: Player, *, full: bool) -> dict[str, Any]:
             }
             for sp, s in appearances
         ]
+        out["profile"] = _profile(db, shots, [s for _, s in appearances])
     return out
+
+
+def _playing(db: DbSession, shots: list[Shot]) -> list[Shot]:
+    """The shots that were played in earnest: in a match, not the balls hit back between points."""
+    sessions = {s.session_id for s in shots}
+    idle = {
+        r.id
+        for r in db.exec(
+            select(Rally).where(
+                col(Rally.session_id).in_(sessions), Rally.end_reason == "not_a_point"
+            )
+        )
+    }
+    return [s for s in shots if s.rally_id not in idle]
+
+
+def _profile(db: DbSession, playing: list[Shot], sessions: list[Session]) -> dict[str, Any]:
+    """Stats across sessions."""
+    from tennis.analysis.profile import player_profile
+
+    metrics: dict[int, dict[str, float]] = {}
+    ids = [s.id for s in playing]
+    for m in db.exec(select(ShotMetric).where(col(ShotMetric.shot_id).in_(ids))):
+        metrics.setdefault(m.shot_id, {})[m.name] = m.value
+    profile = player_profile(
+        [{**s.model_dump(), "session_id": s.session_id} for s in playing],
+        metrics,
+        [
+            {"id": s.id, "recorded_at": s.recorded_at or s.created_at, "kind": s.kind}
+            for s in sessions
+        ],
+    )
+    for point in profile["trend"]:
+        point["recorded_at"] = utc(point["recorded_at"])
+    return profile
 
 
 @router.get("/players")
