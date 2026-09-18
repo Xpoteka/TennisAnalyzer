@@ -50,6 +50,7 @@ class TrackInfo:
     appearance: np.ndarray
     hits: int = 0
     times: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    xy: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))  # court metres, NaN if unknown
 
 
 @dataclass
@@ -84,7 +85,16 @@ class Group:
 
 
 def load_tracks(v: VideoInfo) -> list[TrackInfo]:
-    d = pq.read_table(v.path("people.parquet"), columns=["t", "track_id", "appearance"]).to_pydict()
+    d = pq.read_table(
+        v.path("people.parquet"), columns=["t", "track_id", "appearance", "court_x", "court_y"]
+    ).to_pydict()
+    xy_all = np.array(
+        [
+            [np.nan if x is None else x, np.nan if y is None else y]
+            for x, y in zip(d["court_x"], d["court_y"], strict=True)
+        ],
+        np.float64,
+    ).reshape(-1, 2)
     hits = pq.read_table(v.path("hits.parquet"), columns=["track"]).column("track").to_pylist()
     ids = np.asarray(d["track_id"])
     times = np.asarray(d["t"], np.float64) + v.offset_s
@@ -94,6 +104,7 @@ def load_tracks(v: VideoInfo) -> list[TrackInfo]:
         m = ids == tid
         if m.sum() < MIN_TRACK_SAMPLES:
             continue
+        order = np.argsort(times[m])
         out.append(
             TrackInfo(
                 video=v.id,
@@ -103,10 +114,42 @@ def load_tracks(v: VideoInfo) -> list[TrackInfo]:
                 samples=int(m.sum()),
                 appearance=np.median(looks[m], axis=0),
                 hits=sum(1 for h in hits if h == tid),
-                times=np.sort(times[m]),
+                times=times[m][order],
+                xy=xy_all[m][order],
             )
         )
     return out
+
+
+SAME_PLACE_M = 1.5
+OTHER_PLACE_M = 4.0
+CROSS_VIEW_MIN_S = 3.0
+
+
+def same_place(a: TrackInfo, b: TrackInfo) -> tuple[str, float] | None:
+    """Two tracks from different videos, compared where both were seen at the same time.
+
+    ("same", seconds) when they stood in the same spot of the court: the same person seen
+    by two cameras. ("different", seconds) when they stood far apart. None otherwise.
+    """
+    if a.video == b.video:
+        return None
+    lo, hi = max(a.start, b.start), min(a.end, b.end)
+    if hi - lo < CROSS_VIEW_MIN_S:
+        return None
+    m = (a.times >= lo) & (a.times <= hi) & np.isfinite(a.xy).all(axis=1)
+    ok_b = np.isfinite(b.xy).all(axis=1)
+    if m.sum() < 10 or ok_b.sum() < 10:
+        return None
+    bx = np.interp(a.times[m], b.times[ok_b], b.xy[ok_b, 0])
+    by = np.interp(a.times[m], b.times[ok_b], b.xy[ok_b, 1])
+    d = float(np.median(np.hypot(a.xy[m, 0] - bx, a.xy[m, 1] - by)))
+    seconds = float(hi - lo)
+    if d < SAME_PLACE_M:
+        return "same", seconds
+    if d > OTHER_PLACE_M:
+        return "different", seconds
+    return None
 
 
 def cluster(tracks: list[TrackInfo]) -> list[Group]:
@@ -165,50 +208,48 @@ def two_players(tracks: list[TrackInfo]) -> list[Group]:
 
     Two tracks seen at the same time are different people. With two players on court that
     relation chains through the whole session: near track 1 is not far track 2, which is not
-    near track 3, so near tracks 1 and 3 are the same person. The chain is taken along a
-    maximum spanning tree of "seen together" (in seconds), so a short spell with a third
-    person (a ball kid) or a tracker mix-up cannot flip it. Parts that never meet are
-    matched to each other by clothing colour, largest first.
+    near track 3, so near tracks 1 and 3 are the same person. With several cameras, tracks
+    from two videos that stand on the same spot of the court at the same time are the same
+    person. The chain is taken along a maximum spanning tree of these relations (weighted by
+    seconds), so a short spell with a third person (a ball kid) or a tracker mix-up cannot
+    flip it. Parts that never meet are matched to each other by clothing colour.
     """
     tr = [t for t in tracks if t.end - t.start >= MIN_SINGLES_TRACK_S or t.hits >= 2]
     n = len(tr)
-    edges = []
+    # (weight, i, j, parity): parity 1 = different people, 0 = the same person.
+    edges: list[tuple[float, int, int, int]] = []
     for i in range(n):
         for j in range(i + 1, n):
             w = seen_together(tr[i], tr[j])
             if w > OVERLAP_S:
-                edges.append((w, i, j))
+                edges.append((w, i, j, 1))
+                continue
+            relation = same_place(tr[i], tr[j])
+            if relation is not None:
+                edges.append((relation[1], i, j, 0 if relation[0] == "same" else 1))
     edges.sort(reverse=True)
     parent = list(range(n))
+    parity = [0] * n  # colour relative to the parent
 
-    def root(i: int) -> int:
+    def root(i: int) -> tuple[int, int]:
+        p = 0
         while parent[i] != i:
-            parent[i] = parent[parent[i]]
+            p ^= parity[i]
             i = parent[i]
-        return i
+        return i, p
 
-    tree: list[list[int]] = [[] for _ in range(n)]
-    for _, i, j in edges:
-        ri, rj = root(i), root(j)
+    for _, i, j, rel in edges:
+        (ri, pi), (rj, pj) = root(i), root(j)
         if ri != rj:
             parent[ri] = rj
-            tree[i].append(j)
-            tree[j].append(i)
-    colour = [-1] * n
-    parts: list[list[int]] = []
-    for start in sorted(range(n), key=lambda i: -(tr[i].end - tr[i].start)):
-        if colour[start] >= 0:
-            continue
-        colour[start] = 0
-        part, queue = [start], [start]
-        while queue:
-            i = queue.pop()
-            for j in tree[i]:
-                if colour[j] < 0:
-                    colour[j] = 1 - colour[i]
-                    part.append(j)
-                    queue.append(j)
-        parts.append(part)
+            parity[ri] = pi ^ pj ^ rel
+    groups_of: dict[int, list[int]] = {}
+    colour = [0] * n
+    for i in range(n):
+        r, p = root(i)
+        colour[i] = p
+        groups_of.setdefault(r, []).append(i)
+    parts = list(groups_of.values())
     parts.sort(key=lambda p: -sum(tr[i].end - tr[i].start for i in p))
     players: list[list[TrackInfo]] = [[], []]
     for part in parts:

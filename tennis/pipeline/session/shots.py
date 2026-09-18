@@ -334,6 +334,9 @@ def run(ctx: SessionContext) -> None:
 
     # Rallies, in time order across videos.
     shots.sort(key=lambda r: r["t"])
+    if len(ctx.videos) > 1:
+        shots = merge_views(shots)
+        resegment(shots)
     rally_keys: list[tuple[int, int]] = []
     for r in shots:
         if r["rally_key"] not in rally_keys:
@@ -406,6 +409,58 @@ def run(ctx: SessionContext) -> None:
         with_flight=sum(1 for r in shots if "speed_kmh" in r),
         hands=hands,
     )
+
+
+SAME_SHOT_S = 0.2  # two cameras' detections of one shot are this close on the session clock
+FLIGHT_FIELDS = (
+    "speed_kmh", "avg_speed_kmh", "net_clearance_m", "apex_m", "bounce_x", "bounce_y",
+    "in_court", "depth", "direction", "crosses_net", "hit_x", "hit_y", "contact_height_m",
+)  # fmt: skip
+
+
+def _richness(r: dict[str, Any]) -> tuple[int, float]:
+    return (int("speed_kmh" in r) + int(r["stroke"] != "unknown"), r["quality"]["hit_score"])
+
+
+def merge_views(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One shot seen by several cameras becomes one shot, with the best of each view.
+
+    The view with a measured flight (and a known stroke) is kept; values it lacks are taken
+    from the other view, and so are technique measurements.
+    """
+    out: list[dict[str, Any]] = []
+    for r in shots:
+        prev = out[-1] if out else None
+        same = (
+            prev is not None
+            and prev["video"] != r["video"]
+            and r["t"] - prev["t"] <= SAME_SHOT_S
+            and (prev["label"] == r["label"] or None in (prev["label"], r["label"]))
+        )
+        if not same or prev is None:
+            out.append(r)
+            continue
+        keep, other = (prev, r) if _richness(prev) >= _richness(r) else (r, prev)
+        for key in FLIGHT_FIELDS:
+            if keep.get(key) is None and other.get(key) is not None:
+                keep[key] = other[key]
+        keep["label"] = keep["label"] or other["label"]
+        keep["metrics"] = {**other["metrics"], **keep["metrics"]}
+        keep["sources"] = sorted(set(keep["sources"]) | set(other["sources"]))
+        keep["quality"] = {**keep["quality"], "views": 2}
+        out[-1] = keep
+    return out
+
+
+def resegment(shots: list[dict[str, Any]]) -> None:
+    """Rallies on the session clock: a serve starts one, a pause of ``RALLY_GAP_S`` ends one."""
+    rally = -1
+    prev_t = None
+    for r in shots:
+        if prev_t is None or r["t"] - prev_t > RALLY_GAP_S or r["stroke"] == "serve":
+            rally += 1
+        r["rally_key"] = (0, rally)
+        prev_t = r["t"]
 
 
 def add_movement_metrics(vd: VideoData, rows: list[dict[str, Any]]) -> None:
