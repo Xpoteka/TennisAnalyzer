@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets CI be started by hand from the Actions tab, for a commit that never got a run:
+  # enabling Actions, or fixing whatever kept the runs from being created, does not
+  # replay past events. A run started this way builds the Docker image but does not
+  # push it, since the steps that publish it are limited to push events.
+  workflow_dispatch:
 
 jobs:
   check:
