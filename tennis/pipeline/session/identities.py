@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import pyarrow.parquet as pq
 from sqlmodel import select
 
@@ -30,6 +31,8 @@ from tennis.util.video import grab_frame
 
 if TYPE_CHECKING:
     from tennis.pipeline.session import SessionContext, VideoInfo
+
+FloatArray = npt.NDArray[np.float64]
 
 MERGE_MAX_DISTANCE = 0.38  # clothing-colour distance above which tracks are not joined
 OVERLAP_S = 0.5  # tracks seen together for longer than this are different people
@@ -152,24 +155,63 @@ def same_place(a: TrackInfo, b: TrackInfo) -> tuple[str, float] | None:
     return None
 
 
+def seen_together_matrix(tracks: list[TrackInfo]) -> npt.NDArray[np.bool_]:
+    """Which pairs of tracks were really seen at the same moments (so are different people)."""
+    n = len(tracks)
+    video = np.array([t.video for t in tracks])
+    start = np.array([t.start for t in tracks])
+    end = np.array([t.end for t in tracks])
+    shared = np.minimum(end[:, None], end[None, :]) - np.maximum(start[:, None], start[None, :])
+    together = np.zeros((n, n), bool)
+    # Only tracks of one video whose spans overlap need the look at their samples.
+    for i, j in np.argwhere(np.triu((shared > OVERLAP_S) & (video[:, None] == video), 1)):
+        if seen_together(tracks[i], tracks[j]) > OVERLAP_S:
+            together[i, j] = together[j, i] = True
+    return together
+
+
 def cluster(tracks: list[TrackInfo]) -> list[Group]:
-    """Greedy agglomeration: join the most similar pair that never appears together."""
-    groups = [Group([t]) for t in tracks]
+    """Greedy agglomeration: join the most similar pair that never appears together.
+
+    A long match has a thousand tracks and almost as many joins, so the distances between
+    all groups are kept in one matrix, and a join only redoes the joined group's row.
+    """
+    n = len(tracks)
+    if n < 2:
+        return [Group([t]) for t in tracks]
+    members: list[list[TrackInfo] | None] = [[t] for t in tracks]
+    weight = np.array([t.samples for t in tracks], np.float64)
+    looks = np.array([t.appearance for t in tracks], np.float64)
+    apart = seen_together_matrix(tracks)
+    upper = np.triu(np.ones((n, n), bool), 1)
+
+    def distances(i: int) -> FloatArray:
+        """Hellinger distance (``appearance.distance``) from group ``i`` to every group."""
+        p = np.clip(looks, 0, None)
+        total = p.sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            root = np.sqrt(p / total[:, None])
+        d = np.sqrt(np.clip(1.0 - root @ root[i], 0, None))
+        d[(total <= 0) | (total[i] <= 0)] = 1.0
+        return np.asarray(d)
+
+    dist = np.stack([distances(i) for i in range(n)])
+    alive = np.ones(n, bool)
     while True:
-        best: tuple[float, int, int] | None = None
-        for i in range(len(groups)):
-            for j in range(i + 1, len(groups)):
-                d = distance(groups[i].appearance, groups[j].appearance)
-                if d > MERGE_MAX_DISTANCE or (best is not None and d >= best[0]):
-                    continue
-                if groups[i].overlaps(groups[j]):
-                    continue
-                best = (d, i, j)
-        if best is None:
-            return groups
-        _, i, j = best
-        groups[i] = Group(groups[i].tracks + groups[j].tracks)
-        del groups[j]
+        ok = upper & ~apart & (dist <= MERGE_MAX_DISTANCE) & alive[:, None] & alive[None, :]
+        if not ok.any():
+            return [Group(m) for m in members if m is not None]
+        # The first of the closest pairs, in the order the groups were made.
+        i, j = np.unravel_index(np.argmin(np.where(ok, dist, np.inf)), dist.shape)
+        merged, gone = members[i], members[j]
+        assert merged is not None and gone is not None
+        members[i], members[j] = merged + gone, None
+        looks[i] = (weight[i] * looks[i] + weight[j] * looks[j]) / (weight[i] + weight[j])
+        weight[i] += weight[j]
+        alive[j] = False
+        apart[i] |= apart[j]
+        apart[:, i] |= apart[:, j]
+        dist[i] = dist[:, i] = distances(i)
 
 
 SIGNIFICANT_S = 8.0  # groups on court for less than this are not considered players
