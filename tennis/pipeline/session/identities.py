@@ -202,7 +202,7 @@ def cluster(tracks: list[TrackInfo]) -> list[Group]:
         if not ok.any():
             return [Group(m) for m in members if m is not None]
         # The first of the closest pairs, in the order the groups were made.
-        i, j = np.unravel_index(np.argmin(np.where(ok, dist, np.inf)), dist.shape)
+        i, j = divmod(int(np.argmin(np.where(ok, dist, np.inf))), n)
         merged, gone = members[i], members[j]
         assert merged is not None and gone is not None
         members[i], members[j] = merged + gone, None
