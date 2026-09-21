@@ -121,6 +121,7 @@ def analyze_session(
             on_progress=reporter(done, sstage.weight, sstage.title or sstage.name),
         )
         try:
+            sctx.progress(0.0)  # names the stage; without it the last video stage stays shown
             sstage.run(sctx)
         except Exception as exc:
             _finish(data_root, session_id, "failed", f"{sstage.name}: {_message(exc)}")

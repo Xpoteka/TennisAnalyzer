@@ -18,10 +18,10 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-dev --extra cpu --no-install-project
 COPY . /app
 COPY --from=web /static /app/tennis/api/static
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --extra cpu
 
 
 FROM python:3.11-slim-bookworm

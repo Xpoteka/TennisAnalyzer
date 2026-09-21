@@ -37,6 +37,7 @@ MERGE_S = 0.08  # candidates this close are the same moment
 THRESHOLD = 0.5  # minimum score for a hit
 PEAK_WINDOW = (-0.12, 0.08)  # the wrist peaks at the hit (onsets can lag a frame or two)
 KP_MIN = 0.25
+NEAR_S = 0.1  # a track has to have a frame this close to a candidate to be its hitter
 
 
 @dataclass
@@ -58,7 +59,7 @@ class Track:
             self.typical = float(np.percentile(self.speed, 50))
             self.strong = max(float(np.percentile(self.speed, 97)), self.typical + 1e-3)
 
-    def index_near(self, t: float, max_dt: float = 0.1) -> int | None:
+    def index_near(self, t: float, max_dt: float = NEAR_S) -> int | None:
         if len(self.t) < 2:
             return None
         i = int(np.clip(np.searchsorted(self.t, t), 1, len(self.t) - 1))
@@ -332,5 +333,13 @@ def detect_hits(
     onset_t: FloatArray, onset_db: FloatArray, ball: Ball, tracks: list[Track]
 ) -> list[Hit]:
     cands = gather_candidates(onset_t, onset_db, ball, tracks)
-    options = [o for c in cands for o in score_options(c, ball, tracks)]
+    # Only the tracks on court at a candidate's time can have hit it. Asking every track of a
+    # long video about every candidate made the time grow with the square of its length.
+    tracks = [tr for tr in tracks if len(tr.t)]
+    first = np.array([tr.t[0] for tr in tracks])
+    last = np.array([tr.t[-1] for tr in tracks])
+    options = []
+    for c in cands:
+        present = np.nonzero((first <= c.t + NEAR_S) & (last >= c.t - NEAR_S))[0]
+        options += score_options(c, ball, [tracks[i] for i in present])
     return choose_hits(options)

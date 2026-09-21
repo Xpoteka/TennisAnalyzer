@@ -36,6 +36,10 @@ KEYPOINT_NAMES: tuple[str, ...] = (
 )
 NUM_KEYPOINTS = len(KEYPOINT_NAMES)
 
+# The GPUs a model can run on, in the order ``auto`` looks for them. Models run in half
+# precision on all of them.
+GPU_DEVICES: tuple[str, ...] = ("cuda", "xpu", "mps")
+
 # Limb segments for drawing, as index pairs into KEYPOINT_NAMES.
 SKELETON: tuple[tuple[int, int], ...] = (
     (5, 7), (7, 9), (6, 8), (8, 10),  # arms

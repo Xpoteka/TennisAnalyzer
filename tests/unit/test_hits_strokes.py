@@ -5,7 +5,15 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from tennis.vision.hits import Option, choose_hits
+from tennis.vision.hits import (
+    Ball,
+    Candidate,
+    Option,
+    Track,
+    choose_hits,
+    detect_hits,
+    score_options,
+)
 from tennis.vision.strokes import KP, Swing, classify, racket_hand
 
 
@@ -42,6 +50,33 @@ def test_new_rally_can_start_on_either_side() -> None:
 
 def test_nothing_strong_gives_no_hits() -> None:
     assert choose_hits([opt(0.0, -1, 0.3), opt(5.0, 1, 0.2)]) == []
+
+
+def test_only_tracks_on_court_are_asked_about_a_candidate() -> None:
+    """A long video has many short tracks; skipping the absent ones changes no result."""
+    rng = np.random.default_rng(0)
+    tracks = []
+    for k in range(40):  # one track per ten seconds, alternating sides, a swing in each
+        t = k * 10 + np.arange(0, 9, 0.04)
+        kp = np.zeros((len(t), 17, 3))
+        kp[:, :, 2] = 0.9
+        kp[:, :, 0] = 500 + rng.normal(0, 1, (len(t), 17))
+        kp[:, :, 1] = 400 + rng.normal(0, 1, (len(t), 17))
+        kp[100:110, 9:11, 0] += np.linspace(0, 300, 10)[:, None]
+        side = np.full(len(t), -1 if k % 2 else 1, np.int8)
+        tracks.append(Track(id=k, t=t, kp=kp, height=np.full(len(t), 200.0), side=side))
+    ball = Ball(t=np.zeros(0), xy=np.zeros((0, 2)), reliable=False)
+    onsets = np.array([k * 10 + 4.2 for k in range(40)])
+    hits = detect_hits(onsets, np.full(40, -10.0), ball, tracks)
+    assert len(hits) > 10
+    for h in hits:
+        assert h.track == int(h.t // 10)
+        [everyone] = [o for o in score_options_at(h.t, ball, tracks) if o.side == h.side]
+        assert everyone.track == h.track
+
+
+def score_options_at(t: float, ball: Ball, tracks: list[Track]) -> list[Option]:
+    return score_options(Candidate(t, 1.0, {"audio"}), ball, tracks)
 
 
 def swing(

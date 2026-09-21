@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from tennis.pose_backends.base import NUM_KEYPOINTS, Image, PersonPose
+from tennis.pose_backends.base import GPU_DEVICES, NUM_KEYPOINTS, Image, PersonPose
 
 
 class YoloBackend:
@@ -37,7 +37,7 @@ class YoloBackend:
             batch=len(frames),
             verbose=False,
             # Half precision on a GPU: twice as fast, and the keypoints agree to 0.05 px.
-            quantize=16 if self.device in ("cuda", "mps") else None,
+            quantize=16 if self.device in GPU_DEVICES else None,
         )
         out: list[list[PersonPose]] = []
         result: Any

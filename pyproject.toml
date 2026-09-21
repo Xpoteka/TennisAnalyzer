@@ -25,6 +25,11 @@ dependencies = [
 [project.scripts]
 tennis = "tennis.cli:main"
 
+[project.optional-dependencies]
+cpu = ["torch>=2.14.0", "torchvision>=0.29.0"]
+# triton-xpu is only on PyTorch's own index, so it is named here to be looked up there.
+xpu = ["torch>=2.14.0", "torchvision>=0.29.0", "triton-xpu>=3.8.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -34,16 +39,34 @@ dev = [
     "httpx>=0.27",
 ]
 
-# On Linux (the Docker image, CI) PyTorch comes from its CPU-only index: the CUDA build is
-# several GB of NVIDIA libraries the server cannot use. macOS keeps the PyPI build (Apple GPU).
+# Which PyTorch gets installed decides what the analysis runs on:
+#   uv sync               PyPI's build: NVIDIA GPUs (CUDA) on Linux, the Apple GPU on a Mac
+#   uv sync --extra cpu   CPU only. The Docker image and CI use it: the CUDA build is several
+#                         GB of NVIDIA libraries that a server without such a card cannot use
+#   uv sync --extra xpu   Intel GPUs (Arc, and the graphics built into Core Ultra)
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "xpu" }]]
+
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]
 
 [build-system]
 requires = ["hatchling"]

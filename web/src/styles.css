@@ -563,3 +563,285 @@ tr.selected td {
     padding: 20px 16px 48px;
   }
 }
+
+/* --- review player ------------------------------------------------------------------------ */
+
+.review {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .review {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.review-main,
+.review-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-side {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.review-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.review-stage:fullscreen {
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.review-stage video,
+.review-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.review-stage video {
+  object-fit: contain;
+}
+
+/* The drawing lies over the video; clicks go through to the video's own controls. */
+.review-stage canvas {
+  pointer-events: none;
+}
+
+.timeline {
+  position: relative;
+  height: 34px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.timeline-rally {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent-soft);
+}
+
+.timeline-rally.idle {
+  opacity: 0.4;
+}
+
+.timeline-shot {
+  position: absolute;
+  bottom: 3px;
+  width: 2px;
+  height: 10px;
+  margin-left: -1px;
+  border-radius: 1px;
+  outline: 0.5px solid rgb(0 0 0 / 0.35);
+}
+
+.timeline-shot.error {
+  top: 3px;
+  bottom: auto;
+  width: 3px;
+  height: 14px;
+  background: var(--danger);
+  outline: none;
+}
+
+.timeline-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  pointer-events: none;
+}
+
+.timeline-clock {
+  position: absolute;
+  right: 6px;
+  top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.review-bar,
+.review-layers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.btn-error {
+  color: var(--danger);
+}
+
+.select.small {
+  padding: 3px 6px;
+  font-size: 13px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chip:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.review-shots {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 190px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.review-shots li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.review-shots li:hover {
+  background: var(--surface-2);
+}
+
+.review-shots li.current {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.review-shots li .muted {
+  margin-left: auto;
+}
+
+.dot {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+}
+
+.tag-error {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.review-shot {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  font-size: 13px;
+}
+
+.review-shot dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 6px 0 0;
+}
+
+.review-shot dt {
+  color: var(--muted);
+}
+
+.review-shot dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- errors and patterns ------------------------------------------------------------------- */
+
+table.compact th,
+table.compact td {
+  padding: 5px 8px;
+}
+
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+button.link.muted {
+  color: var(--muted);
+}
+
+.clips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.bar > div {
+  height: 100%;
+  background: var(--accent);
+}
+
+.bar > div.bad {
+  background: var(--danger);
+}

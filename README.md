@@ -21,6 +21,20 @@ uv sync                                  # Python 3.11 and dependencies into .ve
 uv run tennis serve                      # opens http://127.0.0.1:8731/
 ```
 
+### Using a GPU
+
+The slow part of an analysis is the pose model (close to 90% of the time on a CPU), and it runs faster on a GPU. Measured on a laptop with the graphics built into a Core Ultra: a 3-minute clip took 14 minutes instead of 32, with the GPU shared with another analysis at the time. Which GPU it can use depends on the PyTorch build that gets installed:
+
+| Your machine | Install with | Start with |
+|---|---|---|
+| Mac (Apple GPU), or Linux with an NVIDIA card | `uv sync` | `uv run tennis serve` |
+| Intel GPU: Arc, or the graphics built into Core Ultra | `uv sync --extra xpu` | `uv run --extra xpu tennis serve` |
+| No GPU (a small server) | `uv sync --extra cpu` | `uv run --extra cpu tennis serve` |
+
+An Intel GPU also needs Intel's compute driver on the system: `sudo pacman -S intel-compute-runtime level-zero-loader` on Arch, `sudo apt install intel-opencl-icd libze-intel-gpu1 libze1` on Ubuntu. Your user must be in the `render` group.
+
+The GPU is picked up by itself (`pose.device: auto` in `config.yaml`; `cuda`, `xpu`, `mps` or `cpu` forces one). The log of an analysis says which one it used: `pose model loaded (... device=xpu ...)`.
+
 For UI work, run `uv run tennis serve --no-open` and `npm run dev` in `web/` together. Vite serves the UI on :5173 with hot reload and forwards `/api` to the server.
 
 On a server, use the Docker image (`ghcr.io/xpoteka/tennisanalyzer`). It needs a password to listen on the network. See [docs/DEPLOY.md](docs/DEPLOY.md).
@@ -29,6 +43,8 @@ On a server, use the Docker image (`ghcr.io/xpoteka/tennisanalyzer`). It needs a
 
 - **Upload.** Drop one or more videos of one session: two cameras, or one recording in several parts. Uploads go up in 32 MB pieces and resume if cut off. Videos already on the server (copied into `data/uploads/`) can be picked from a list instead.
 - **Sessions.** Each session shows its type (match or training, detected automatically, and you can override it), the players, and the stats. Click a shot or a point to watch it.
+- **Reviewing.** Clicking a shot, point or error opens the review player. It draws the analysis over the video in layers you switch on and off: skeletons, running paths, the ball, bounces (red when out), shot labels and the court lines. Beside it, a small court shows where both players stand and the shots of the current point. The timeline under it marks every point and shot, errors in red. Keys: `N`/`P` next/previous point, `E`/`Shift+E` next/previous error, `,`/`.` one frame, `S` slow motion, `L` loop the point, `Space` play/pause.
+- **Errors and Patterns.** The Errors tab lists every ball into the net, out, and every serve fault, by player and stroke, with where they landed or were hit from. Patterns shows error rates by court position and by the ball you were answering, serve placement, points won by rally length, split steps and recovery. Every number links to its clips.
 - **Players.** Everyone recognised, with stats and technique over time. Rename a profile, or merge two that are the same person.
 - **Settings.** The video library, with free disk space, and `config.yaml`.
 
