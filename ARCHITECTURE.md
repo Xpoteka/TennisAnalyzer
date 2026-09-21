@@ -98,6 +98,10 @@ Court metres: origin at the centre of the net, `x` across (right as seen from th
 | Server of a point | 98% | |
 | Winner of a point | 55% | **weak**: the last shot of a point is often missed or followed by a ball hit back |
 
+### Review player
+
+The browser draws the overlays itself, on a canvas over the proxy video; nothing is rendered into the video. `GET /api/videos/<id>/overlay` gives what holds for the whole video (its size, the court lines and every bounce projected to pixels, which track is which player). `GET /api/videos/<id>/tracks?start=&end=` gives ball, poses and feet from the stage files in slices (`tennis/api/tracks.py`; PTS seconds, source pixels, gzipped, about 20 KB per ten seconds). What counts as an error is decided in one place, `web/src/review.ts`: a shot whose flight ended in the net or outside the lines; for serves, a fault or double fault.
+
 **Times in the database are session seconds.** A video's PTS `t` is at session time `t + offset_s`.
 
 ## Paths

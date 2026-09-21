@@ -29,6 +29,8 @@ On a server, use the Docker image (`ghcr.io/xpoteka/tennisanalyzer`). It needs a
 
 - **Upload.** Drop one or more videos of one session: two cameras, or one recording in several parts. Uploads go up in 32 MB pieces and resume if cut off. Videos already on the server (copied into `data/uploads/`) can be picked from a list instead.
 - **Sessions.** Each session shows its type (match or training, detected automatically, and you can override it), the players, and the stats. Click a shot or a point to watch it.
+- **Reviewing.** Clicking a shot, point or error opens the review player. It draws the analysis over the video in layers you switch on and off: skeletons, running paths, the ball, bounces (red when out), shot labels and the court lines. Beside it, a small court shows where both players stand and the shots of the current point. The timeline under it marks every point and shot, errors in red. Keys: `N`/`P` next/previous point, `E`/`Shift+E` next/previous error, `,`/`.` one frame, `S` slow motion, `L` loop the point, `Space` play/pause.
+- **Errors and Patterns.** The Errors tab lists every ball into the net, out, and every serve fault, by player and stroke, with where they landed or were hit from. Patterns shows error rates by court position and by the ball you were answering, serve placement, points won by rally length, split steps and recovery. Every number links to its clips.
 - **Players.** Everyone recognised, with stats and technique over time. Rename a profile, or merge two that are the same person.
 - **Settings.** The video library, with free disk space, and `config.yaml`.
 
