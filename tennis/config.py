@@ -55,7 +55,7 @@ class PoseConfig(_Section):
     model: str = "yolo11m-pose.pt"
     # Person detector for small far players (their pose comes from an enlarged crop).
     detector_model: str = "yolo11s.pt"
-    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    device: Literal["auto", "cuda", "xpu", "mps", "cpu"] = "auto"
     batch_size: int = Field(16, ge=1)
     imgsz: int = Field(640, ge=32)
     min_person_conf: float = Field(0.2, ge=0, le=1)

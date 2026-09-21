@@ -12,6 +12,7 @@ from pathlib import Path
 from tennis.config import PoseConfig
 from tennis.errors import UserError
 from tennis.pose_backends.base import (
+    GPU_DEVICES,
     KEYPOINT_NAMES,
     NUM_KEYPOINTS,
     SKELETON,
@@ -21,6 +22,7 @@ from tennis.pose_backends.base import (
 )
 
 __all__ = [
+    "GPU_DEVICES",
     "KEYPOINT_NAMES",
     "NUM_KEYPOINTS",
     "SKELETON",
@@ -53,20 +55,23 @@ register_backend("yolo", _yolo)
 
 
 def resolve_device(requested: str) -> str:
-    """``auto`` picks CUDA, then Apple MPS, then CPU. An unavailable request falls back to CPU."""
+    """``auto`` picks the first GPU there is: NVIDIA (CUDA), Intel (XPU), Apple (MPS); else CPU.
+
+    An unavailable request falls back to CPU.
+    """
     try:
         import torch
     except ImportError:
         return "cpu"
-    cuda = torch.cuda.is_available()
-    mps = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+    # Which GPUs PyTorch can use depends on the build installed (see pyproject.toml).
+    available = {
+        "cuda": torch.cuda.is_available(),
+        "xpu": hasattr(torch, "xpu") and torch.xpu.is_available(),
+        "mps": bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available(),
+    }
     if requested == "auto":
-        return "cuda" if cuda else "mps" if mps else "cpu"
-    if requested == "cuda" and not cuda:
-        return "cpu"
-    if requested == "mps" and not mps:
-        return "cpu"
-    return requested
+        return next((name for name in GPU_DEVICES if available[name]), "cpu")
+    return requested if available.get(requested, True) else "cpu"
 
 
 def resolve_model_path(model: str, data_root: Path) -> Path:

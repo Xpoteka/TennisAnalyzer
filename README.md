@@ -21,6 +21,20 @@ uv sync                                  # Python 3.11 and dependencies into .ve
 uv run tennis serve                      # opens http://127.0.0.1:8731/
 ```
 
+### Using a GPU
+
+The slow part of an analysis is the pose model (close to 90% of the time on a CPU), and it runs faster on a GPU. Measured on a laptop with the graphics built into a Core Ultra: a 3-minute clip took 14 minutes instead of 32, with the GPU shared with another analysis at the time. Which GPU it can use depends on the PyTorch build that gets installed:
+
+| Your machine | Install with | Start with |
+|---|---|---|
+| Mac (Apple GPU), or Linux with an NVIDIA card | `uv sync` | `uv run tennis serve` |
+| Intel GPU: Arc, or the graphics built into Core Ultra | `uv sync --extra xpu` | `uv run --extra xpu tennis serve` |
+| No GPU (a small server) | `uv sync --extra cpu` | `uv run --extra cpu tennis serve` |
+
+An Intel GPU also needs Intel's compute driver on the system: `sudo pacman -S intel-compute-runtime level-zero-loader` on Arch, `sudo apt install intel-opencl-icd libze-intel-gpu1 libze1` on Ubuntu. Your user must be in the `render` group.
+
+The GPU is picked up by itself (`pose.device: auto` in `config.yaml`; `cuda`, `xpu`, `mps` or `cpu` forces one). The log of an analysis says which one it used: `pose model loaded (... device=xpu ...)`.
+
 For UI work, run `uv run tennis serve --no-open` and `npm run dev` in `web/` together. Vite serves the UI on :5173 with hot reload and forwards `/api` to the server.
 
 On a server, use the Docker image (`ghcr.io/xpoteka/tennisanalyzer`). It needs a password to listen on the network. See [docs/DEPLOY.md](docs/DEPLOY.md).
