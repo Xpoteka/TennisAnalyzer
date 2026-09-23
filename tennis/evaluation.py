@@ -172,3 +172,78 @@ def evaluate_shots(
             right += truth == found
         stroke_acc = right / len(pairs)
     return ShotReport(report, player_acc, mapping, stroke_acc, confusion)
+
+
+def parse_score(text: str) -> tuple[int, int]:
+    """Games won so far by each player from a score text like ``"7-6 4-3, 30-15"``."""
+    games = text.split(",")[0].strip()
+    a = b = 0
+    for part in games.split():
+        if "-" not in part:
+            continue
+        x, y = part.split("-", 1)
+        try:
+            a += int(x)
+            b += int(y)
+        except ValueError:
+            continue
+    return a, b
+
+
+@dataclass
+class GameReport:
+    checkpoints: int
+    exact: int  # checkpoints where both game counts were right
+    error_games: float  # mean absolute error in games, summed over both players
+    found_final: str
+    truth_final: tuple[int, int]
+    self_first: bool
+
+    def text(self) -> str:
+        return (
+            f"games: {self.exact}/{self.checkpoints} checkpoints exact, "
+            f"{self.error_games:.2f} games off on average; "
+            f"found {self.found_final or '?'} (self {'first' if self.self_first else 'second'}), "
+            f"scoreboard ends at self {self.truth_final[0]} - other {self.truth_final[1]}"
+        )
+
+
+def evaluate_games(
+    points: list[tuple[float, str]],
+    checkpoints: list[tuple[float, int, int]],
+    *,
+    final: str = "",
+    max_wait_s: float = 180.0,
+) -> GameReport:
+    """``points``: (start time, score text before the point). ``checkpoints``: (t, self, other).
+
+    At each checkpoint the score before the first point starting after ``t`` is read; the
+    scoreboard was updated between points, so that point's score is what it should show.
+    """
+    found: list[tuple[int, int] | None] = []
+    for t, _, _ in checkpoints:
+        nxt = next((p for p in points if t <= p[0] <= t + max_wait_s), None)
+        found.append(parse_score(nxt[1]) if nxt else None)
+    best: tuple[float, int, bool] | None = None
+    for self_first in (True, False):
+        err = 0.0
+        exact = 0
+        for (_, a, b), f in zip(checkpoints, found, strict=True):
+            if f is None:
+                err += a + b
+                continue
+            fa, fb = f if self_first else (f[1], f[0])
+            err += abs(fa - a) + abs(fb - b)
+            exact += fa == a and fb == b
+        if best is None or err < best[0]:
+            best = (err, exact, self_first)
+    assert best is not None
+    truth = checkpoints[-1][1:] if checkpoints else (0, 0)
+    return GameReport(
+        checkpoints=len(checkpoints),
+        exact=best[1],
+        error_games=best[0] / max(1, len(checkpoints)),
+        found_final=final,
+        truth_final=(int(truth[0]), int(truth[1])),
+        self_first=best[2],
+    )

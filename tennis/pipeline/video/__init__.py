@@ -35,7 +35,7 @@ VIDEO_STAGES: tuple[VideoStage, ...] = (
         title="Following every swing",
     ),
     VideoStage(
-        "hits", hits.run, hits.OUTPUTS, weight=0.3,
+        "hits", hits.run, hits.OUTPUTS, version=2, weight=0.3,
         title="Finding the hits",
     ),
 )  # fmt: skip

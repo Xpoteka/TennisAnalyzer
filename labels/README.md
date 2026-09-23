@@ -30,6 +30,18 @@ t,note
 
 All times are Wingfield's own clock, in whole seconds. Measure the offset to the video before using them; for 2025-01-10 it is +1 s.
 
+## `games_<session-id>.csv`: the games at a few moments
+
+For `tennis eval-games`. Read the score off a scoreboard (a court camera burns it into the video) or a point log at a few moments: one row per moment with the games each player has won so far, sets added up.
+
+```csv
+t,self,other,note
+2:25,0,1,
+6:21,2,1,
+50:25,6,7,set 1 lost 6-7
+57:17,7,7,
+```
+
 ## `strokes_<session-id>.csv`: stroke types
 
 For `tennis eval-classifier`. Two shapes are accepted, and the header decides which:

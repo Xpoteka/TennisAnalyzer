@@ -17,27 +17,37 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tennis.util.io import read_json, write_parquet
+from tennis.vision import court as court_mod
 from tennis.vision.hits import Ball, Track, detect_hits
 
 if TYPE_CHECKING:
     from tennis.pipeline import VideoContext
 
 OUTPUTS = ("hits.parquet",)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def load_tracks(ctx: VideoContext, has_court: bool) -> list[Track]:
     """Players at the full frame rate, each frame tagged with the side of the net."""
     people = pq.read_table(
-        ctx.path("people.parquet"), columns=["t", "track_id", "court_y", "foot_py"]
+        ctx.path("people.parquet"), columns=["t", "track_id", "court_x", "court_y", "foot_py"]
     ).to_pydict()
     if not people["t"]:
         return []
     p_track = np.asarray(people["track_id"])
     p_t = np.asarray(people["t"], np.float64)
+    bystanders: set[int] = set()
     if has_court:
         court_y = np.asarray([np.nan if v is None else v for v in people["court_y"]], np.float64)
         p_side = np.where(court_y > 0, 1, -1).astype(np.int8)
+        # People beside the court (on the bench, on the next court seen through the fence)
+        # swing their arms and hit balls too; they must not be offered as the hitter.
+        court_x = np.asarray([np.nan if v is None else v for v in people["court_x"]], np.float64)
+        for tid in np.unique(p_track):
+            x = court_x[p_track == tid]
+            x = x[np.isfinite(x)]
+            if len(x) and float(np.median(np.abs(x))) > court_mod.HALF_PLAY_W:
+                bystanders.add(int(tid))
     else:
         # Without a court, the near player's feet are lower in the picture.
         foot_y = np.asarray(people["foot_py"], np.float64)
@@ -55,6 +65,8 @@ def load_tracks(ctx: VideoContext, has_court: bool) -> list[Track]:
     height = np.asarray(m["height"], np.float64)
     out = []
     for tid in np.unique(track_ids):
+        if int(tid) in bystanders:
+            continue
         sel = track_ids == tid
         order = np.argsort(times[sel])
         t = times[sel][order]

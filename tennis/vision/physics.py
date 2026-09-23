@@ -45,24 +45,48 @@ class Flight:
 
 def simulate(p0: FloatArray, v0: FloatArray, duration: float, *, bounces: bool = True) -> Flight:
     """Integrate the flight for ``duration`` seconds (semi-implicit Euler, 5 ms steps)."""
+    pos, vel, bounce = simulate_many(
+        np.asarray(p0, np.float64)[None],
+        np.asarray(v0, np.float64)[None],
+        duration,
+        bounces=bounces,
+    )
+    b = int(bounce[0])
+    return Flight(
+        np.arange(pos.shape[1], dtype=np.float64) * DT, pos[0], vel[0], b if b >= 0 else None
+    )
+
+
+def simulate_many(
+    p0: FloatArray, v0: FloatArray, duration: float, *, bounces: bool = True
+) -> tuple[FloatArray, FloatArray, npt.NDArray[np.int64]]:
+    """Several flights at once: ``p0`` and ``v0`` are (B, 3).
+
+    Returns positions (B, N, 3), velocities (B, N, 3) and the bounce step per flight (-1 if
+    none). Stepping every flight together keeps the fit's Jacobian cheap.
+    """
     n = max(2, int(np.ceil(duration / DT)) + 1)
-    pos = np.empty((n, 3))
-    vel = np.empty((n, 3))
-    p = np.asarray(p0, np.float64).copy()
-    v = np.asarray(v0, np.float64).copy()
-    bounce: int | None = None
+    p = np.array(p0, np.float64)
+    v = np.array(v0, np.float64)
+    m = len(p)
+    pos = np.empty((m, n, 3))
+    vel = np.empty((m, n, 3))
+    bounce = np.full(m, -1, dtype=np.int64)
+    scale = np.array([BOUNCE_FRICTION, BOUNCE_FRICTION, -RESTITUTION])
     for i in range(n):
-        pos[i], vel[i] = p, v
-        speed = float(np.sqrt(v @ v))
-        a = -DRAG_K * speed * v
-        a[2] -= G
+        pos[:, i], vel[:, i] = p, v
+        speed = np.sqrt(np.einsum("ij,ij->i", v, v))
+        a = -DRAG_K * speed[:, None] * v
+        a[:, 2] -= G
         v = v + a * DT
         p = p + v * DT
-        if bounces and bounce is None and p[2] < 0 and v[2] < 0 and i + 1 < n:
-            p[2] = -p[2] * RESTITUTION
-            v = np.array([v[0] * BOUNCE_FRICTION, v[1] * BOUNCE_FRICTION, -v[2] * RESTITUTION])
-            bounce = i + 1
-    return Flight(np.arange(n, dtype=np.float64) * DT, pos, vel, bounce)
+        if bounces and i + 1 < n:
+            hit = (bounce < 0) & (p[:, 2] < 0) & (v[:, 2] < 0)
+            if hit.any():
+                p[hit, 2] = -p[hit, 2] * RESTITUTION
+                v[hit] = v[hit] * scale
+                bounce[hit] = i + 1
+    return pos, vel, bounce
 
 
 def _at(flight: Flight, times: FloatArray) -> FloatArray:
@@ -113,17 +137,28 @@ def fit_flight(
     p0_guess = np.asarray(p0_guess, np.float64)
     scale_px = max(cal.width, cal.height) / 1000  # residuals in about "pixels at 1000 px"
 
-    def model(params: FloatArray) -> FloatArray:
-        p0 = p0_guess + params[:3]
-        f = simulate(p0, params[3:6], horizon)
-        return cal.world_to_image(_at(f, obs_t))
+    idx = np.clip(np.round(obs_t / DT).astype(np.int64), 0, None)
+    n_obs = len(obs_t)
+    prior_scale = 3.0 / contact_slack_m  # keep the contact point near the guess
+
+    def residuals_many(params: FloatArray) -> FloatArray:
+        """Residuals for several parameter sets at once: (B, 2 * n_obs + 3)."""
+        params = np.atleast_2d(params)
+        pos, _, _ = simulate_many(p0_guess + params[:, :3], params[:, 3:6], horizon)
+        at = pos[:, np.minimum(idx, pos.shape[1] - 1)]
+        px = cal.world_to_image(at.reshape(-1, 3)).reshape(len(params), n_obs, 2)
+        r = (px - obs_px) / scale_px
+        r = np.where(np.isfinite(r), r, 200.0).reshape(len(params), -1)
+        return np.concatenate([r, params[:, :3] * prior_scale], axis=1)
 
     def residuals(params: FloatArray) -> FloatArray:
-        px = model(params)
-        r = (px - obs_px) / scale_px
-        r = np.where(np.isfinite(r), r, 200.0).ravel()
-        prior = params[:3] / contact_slack_m * 3.0  # keep the contact point near the guess
-        return np.concatenate([r, prior])
+        return np.asarray(residuals_many(params)[0])
+
+    def jacobian(params: FloatArray) -> FloatArray:
+        step = 1e-6 * np.maximum(1.0, np.abs(params))
+        many = np.vstack([params, params + np.diag(step)])
+        r = residuals_many(many)
+        return np.asarray((r[1:] - r[0]) / step[:, None]).T
 
     best = None
     # Start from a few speeds; the direction of play is known.
@@ -131,7 +166,9 @@ def fit_flight(
         v_guess = np.array([0.0, toward_y * speed, 3.0])
         x0 = np.concatenate([np.zeros(3), v_guess])
         try:
-            sol = least_squares(residuals, x0, loss="soft_l1", f_scale=4.0, max_nfev=200)
+            sol = least_squares(
+                residuals, x0, jac=jacobian, loss="soft_l1", f_scale=4.0, max_nfev=200
+            )
         except (ValueError, np.linalg.LinAlgError):
             continue
         if best is None or sol.cost < best.cost:

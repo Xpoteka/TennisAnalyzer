@@ -4,12 +4,15 @@
 it by hand. ``scoring`` only runs for matches between two players:
 
 1. **Points.** A point starts with a serve. Rallies that do not (balls hit back between
-   points, warm-up) are not points. A rally that is only a serve, followed within
-   ``FAULT_GAP_S`` by another serve from the same player, was a fault: the point goes on
-   with the second serve. Two faults in a row are a double fault.
+   points, warm-up) are not points. A rally of at most two shots, followed within
+   ``FAULT_GAP_S`` by another serve from the same player standing in the same service box
+   (the same side of the centre mark), was a fault: the point goes on with the second
+   serve. After a point the server moves to the other box. Two faults in a row are a
+   double fault.
 2. **Who won each point, probably.** From the last shot: into the net or out means its
    hitter lost; in and not returned means its hitter won. Without a measured flight the
-   last hitter usually loses (most points end in errors).
+   last hitter usually loses (most points end in errors). A serve that was not returned
+   is a little less telling: a service winner and a missed second serve look the same.
 3. **Score.** :mod:`tennis.analysis.scoring` turns the servers and these probabilities into
    games and sets that follow the rules.
 """
@@ -29,9 +32,12 @@ if TYPE_CHECKING:
     from tennis.pipeline.session import SessionContext
 
 FAULT_GAP_S = 25.0
+FAULT_MAX_SHOTS = 2  # the serve, and the receiver's courtesy return at most
+CENTRE_MARK_MARGIN_M = 0.2  # a server this close to the centre could be in either box
 # Without a measured flight: most points end in an error by whoever hit last (in the
 # Wingfield reference match 46 of 68 points ended in an error, 10 with a winner).
 P_LAST_HITTER_UNKNOWN = 0.25
+P_SERVE_NOT_RETURNED = 0.3
 
 
 def _load(ctx: SessionContext) -> tuple[list[Rally], dict[int, list[Shot]], dict[int, int]]:
@@ -61,13 +67,16 @@ def run_kind(ctx: SessionContext) -> None:
         if not shots:
             continue
         first = shots[0]
+        # Only serves seen in the swing count here: a serve inferred from where the ball
+        # was hit would make a training session's feeds look like serves.
+        is_serve = first.stroke == "serve" and (first.quality or {}).get("serve_by") != "position"
         infos.append(
             RallyInfo(
                 start=r.start_s,
                 end=r.end_s,
                 shots=len(shots),
-                first_is_serve=first.stroke == "serve",
-                server=index.get(first.player_id or -1) if first.stroke == "serve" else None,
+                first_is_serve=is_serve,
+                server=index.get(first.player_id or -1) if is_serve else None,
             )
         )
     result = classify_session(infos)
@@ -94,9 +103,28 @@ def point_probability(last: Shot, server: int, hitter: int) -> tuple[float, str]
         p_hitter, how = 0.2, "out"
     elif last.in_court is True:
         p_hitter, how = 0.8, "ace" if last.stroke == "serve" else "winner"
+    elif last.stroke == "serve":
+        p_hitter, how = P_SERVE_NOT_RETURNED, "unknown"
     else:
         p_hitter, how = P_LAST_HITTER_UNKNOWN, "unknown"
     return (p_hitter if hitter == server else 1 - p_hitter), how
+
+
+def service_box(serve: Shot) -> int | None:
+    """Which side of the centre mark the server stood on: -1, +1, or None when unclear."""
+    if serve.hit_x is None or abs(serve.hit_x) < CENTRE_MARK_MARGIN_M:
+        return None
+    return -1 if serve.hit_x < 0 else 1
+
+
+def was_fault(shots: list[Shot], nxt: list[Shot] | None) -> bool:
+    """A short serve rally followed by the same player serving again from the same box."""
+    if nxt is None or len(shots) > FAULT_MAX_SHOTS or shots[0].in_court is True:
+        return False
+    box, box_next = service_box(shots[0]), service_box(nxt[0])
+    if box is None or box_next is None:
+        return len(shots) == 1
+    return box == box_next
 
 
 def run_scoring(ctx: SessionContext) -> None:
@@ -121,13 +149,12 @@ def run_scoring(ctx: SessionContext) -> None:
     for k, (r, shots) in enumerate(serve_rallies):
         server = index[shots[0].player_id or -1]
         nxt = serve_rallies[k + 1] if k + 1 < len(serve_rallies) else None
-        only_serve = len(shots) == 1
         next_same_server = (
             nxt is not None
             and index.get(nxt[1][0].player_id or -1) == server
             and nxt[0].start_s - r.end_s < FAULT_GAP_S
         )
-        if only_serve and next_same_server and shots[0].in_court is not True:
+        if next_same_server and nxt is not None and was_fault(shots, nxt[1]):
             if pending_fault is not None:  # second fault in a row: double fault
                 points.append(
                     {"rally": r, "server": server, "p": 0.08, "how": "double_fault", "faults": 2}
