@@ -108,6 +108,24 @@ export type Rally = {
   score_before: Record<string, unknown> | null;
 };
 
+/** What stays the same over a whole video. Pixels are the source video's own. */
+export type Overlay = {
+  width: number | null;
+  height: number | null;
+  court: [number, number][][];
+  players: Record<string, number>; // track id -> player id
+  bounces: Record<string, [number, number]>; // shot id -> where it bounced, in pixels
+};
+
+/** A slice of a video's tracks. Times are PTS seconds: proxy time + `proxy_start_pts`. */
+export type TrackSlice = {
+  start: number;
+  end: number;
+  ball: [t: number, x: number, y: number, track: number][];
+  poses: [t: number, track: number, x: (number | null)[], y: (number | null)[]][];
+  feet: [t: number, track: number, px: number, py: number, cx: number | null, cy: number | null][];
+};
+
 export type PlayerSummary = {
   id: number;
   name: string;
@@ -235,6 +253,9 @@ export const api = {
   deleteSession: (id: number) => request("DELETE", `/api/sessions/${id}`),
   shots: (id: number) => request<Shot[]>("GET", `/api/sessions/${id}/shots`),
   rallies: (id: number) => request<Rally[]>("GET", `/api/sessions/${id}/rallies`),
+  overlay: (videoId: number) => request<Overlay>("GET", `/api/videos/${videoId}/overlay`),
+  tracks: (videoId: number, start: number, end: number) =>
+    request<TrackSlice>("GET", `/api/videos/${videoId}/tracks?start=${start}&end=${end}`),
 
   jobs: (active = false) => request<Job[]>("GET", `/api/jobs?active=${active}`),
   cancelJob: (id: number) => request("POST", `/api/jobs/${id}/cancel`),

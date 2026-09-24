@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, type Rally, type SessionDetail, type Shot, type Video } from "../api";
 import { Avatar, KindBadge, StatusBadge } from "../components/Badges";
@@ -12,9 +12,12 @@ import {
   pct,
   sessionTitle,
 } from "../format";
+import ReviewPlayer from "../components/ReviewPlayer";
 import { useData } from "../hooks";
+import { ERROR_LABELS, indexShots, missSide, type ShotIndex } from "../review";
+import { Errors, Patterns } from "./SessionInsights";
 
-type Tab = "overview" | "shots" | "points" | "videos";
+type Tab = "overview" | "shots" | "errors" | "patterns" | "points" | "videos";
 
 const running = (s?: SessionDetail) => s?.status === "queued" || s?.status === "processing";
 
@@ -29,8 +32,8 @@ export default function SessionPage() {
   const shots = useData(() => (ready ? api.shots(id) : Promise.resolve([])), [id, ready]);
   const rallies = useData(() => (ready ? api.rallies(id) : Promise.resolve([])), [id, ready]);
   const [tab, setTab] = useState<Tab>("overview");
-  const player = useRef<HTMLVideoElement>(null);
-  const [playing, setPlaying] = useState<{ video: Video; t: number }>();
+  const [playing, setPlaying] = useState<{ video: Video; t: number; n: number }>();
+  const index = useMemo(() => indexShots(shots.data ?? [], rallies.data ?? []), [shots.data, rallies.data]);
 
   const s = session.data;
   if (session.error && !s) return <div className="notice notice-error">{session.error}</div>;
@@ -41,22 +44,27 @@ export default function SessionPage() {
     return i >= 0 ? PLAYER_COLORS[i % PLAYER_COLORS.length] : "#bbbbbb";
   };
 
-  /** Play the moment at session time `t` in the video that covers it. */
-  const playAt = (t: number, videoId?: number) => {
+  /** Play the moment at session time `t` in the video that covers it, `lead` seconds early. */
+  const playAt = (t: number, videoId?: number, lead = 2) => {
     const video =
       s.videos.find((v) => v.id === videoId) ??
       s.videos.find((v) => t >= v.offset_s && t <= v.offset_s + (v.duration_s ?? 0)) ??
       s.videos[0];
     if (!video?.proxy_url) return;
     const local = t - video.offset_s - (video.proxy_start_pts ?? 0);
-    setPlaying({ video, t: Math.max(0, local - 2) });
-    requestAnimationFrame(() => player.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+    // A new `n` with every request, so asking for the same moment twice seeks twice.
+    setPlaying((old) => ({ video, t: Math.max(0, local - lead), n: (old?.n ?? 0) + 1 }));
+    requestAnimationFrame(() =>
+      document.querySelector(".review-stage")?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+    );
   };
 
   const isMatch = s.kind === "match";
   const tabs: [Tab, string][] = [
     ["overview", "Overview"],
     ["shots", `Shots${shots.data?.length ? ` (${shots.data.length})` : ""}`],
+    ...(index.errorOf.size ? ([["errors", `Errors (${index.errorOf.size})`]] as [Tab, string][]) : []),
+    ...(shots.data?.length ? ([["patterns", "Patterns"]] as [Tab, string][]) : []),
     ...(isMatch ? ([["points", "Points"]] as [Tab, string][]) : []),
     ["videos", `Videos (${s.videos.length})`],
   ];
@@ -95,14 +103,16 @@ export default function SessionPage() {
       <Warnings s={s} />
 
       {playing?.video.proxy_url && (
-        <video
-          ref={player}
-          key={playing.video.id}
-          className="video-player"
-          src={playing.video.proxy_url}
-          controls
-          autoPlay
-          onLoadedMetadata={(e) => (e.currentTarget.currentTime = playing.t)}
+        <ReviewPlayer
+          s={s}
+          video={playing.video}
+          target={playing}
+          shots={shots.data ?? []}
+          rallies={rallies.data ?? []}
+          index={index}
+          colorOf={colorOf}
+          playAt={playAt}
+          onClose={() => setPlaying(undefined)}
         />
       )}
 
@@ -115,7 +125,21 @@ export default function SessionPage() {
           ))}
         </div>
         {tab === "overview" && <Overview s={s} shots={shots.data ?? []} colorOf={colorOf} playAt={playAt} />}
-        {tab === "shots" && <ShotTable s={s} shots={shots.data ?? []} playAt={playAt} />}
+        {tab === "shots" && <ShotTable s={s} shots={shots.data ?? []} index={index} playAt={playAt} />}
+        {(tab === "errors" || tab === "patterns") &&
+          (() => {
+            const View = tab === "errors" ? Errors : Patterns;
+            return (
+              <View
+                s={s}
+                shots={shots.data ?? []}
+                rallies={rallies.data ?? []}
+                index={index}
+                colorOf={colorOf}
+                playAt={playAt}
+              />
+            );
+          })()}
         {tab === "points" && <Points s={s} rallies={rallies.data ?? []} playAt={playAt} />}
         {tab === "videos" && <Videos s={s} onChanged={session.reload} playAt={playAt} />}
       </div>
@@ -440,18 +464,25 @@ function Kpi({
 function ShotTable({
   s,
   shots,
+  index,
   playAt,
 }: {
   s: SessionDetail;
   shots: Shot[];
+  index: ShotIndex;
   playAt: (t: number, videoId?: number) => void;
 }) {
   const [who, setWho] = useState("all");
   const [stroke, setStroke] = useState("all");
+  const [result, setResult] = useState("all");
   const [selected, setSelected] = useState<number>();
   const names = Object.fromEntries(s.players.map((p) => [p.player_id, p.name]));
   const rows = shots.filter(
-    (x) => (who === "all" || String(x.player_id) === who) && (stroke === "all" || x.stroke === stroke),
+    (x) =>
+      (who === "all" || String(x.player_id) === who) &&
+      (stroke === "all" || x.stroke === stroke) &&
+      (result === "all" ||
+        (result === "error" ? index.errorOf.has(x.id) : !index.errorOf.has(x.id) && x.outcome === result)),
   );
   if (!shots.length) return <div className="card empty">No shots found yet.</div>;
   const f = (v: number | null, d = 0) => (v == null ? "—" : v.toFixed(d));
@@ -473,6 +504,11 @@ function ShotTable({
               {STROKE_LABELS[k] ?? k}
             </option>
           ))}
+        </select>
+        <select className="select" value={result} onChange={(e) => setResult(e.target.value)}>
+          <option value="all">All results</option>
+          <option value="in">In</option>
+          <option value="error">Errors and faults</option>
         </select>
         <span className="muted small">{rows.length} shots · click one to watch it</span>
       </div>
@@ -510,7 +546,13 @@ function ShotTable({
                 <td className="num">{f(x.net_clearance_m, 2)}</td>
                 <td>{x.depth ?? "—"}</td>
                 <td>{x.direction ?? "—"}</td>
-                <td>{x.outcome ?? (x.in_court == null ? "—" : x.in_court ? "in" : "out")}</td>
+                <td>
+                  {index.errorOf.has(x.id) ? (
+                    <span className="tag-error">{missSide(x) ?? ERROR_LABELS[index.errorOf.get(x.id)!]}</span>
+                  ) : (
+                    (x.outcome ?? "—")
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from tennis.pose_backends.base import GPU_DEVICES
+
 PERSON = 0
 SPORTS_BALL = 32
 
@@ -54,7 +56,7 @@ class Detector:
             device=self.device,
             batch=len(frames),
             verbose=False,
-            quantize=16 if self.device in ("cuda", "mps") else None,
+            quantize=16 if self.device in GPU_DEVICES else None,
         )
         out: list[list[Box]] = []
         for r in results:

@@ -30,7 +30,7 @@ pose:
   backend: yolo
   model: yolo11m-pose.pt      # downloaded into <data_root>/models on first use
   detector_model: yolo11s.pt  # finds small far players; their pose comes from a zoomed crop
-  device: auto                # auto | cuda | mps | cpu
+  device: auto                # auto | cuda (NVIDIA) | xpu (Intel) | mps (Apple) | cpu
   batch_size: 16
   imgsz: 640
   min_person_conf: 0.2

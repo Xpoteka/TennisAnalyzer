@@ -4,10 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets CI be started by hand from the Actions tab, for a commit that never got a run:
+  # enabling Actions, or fixing whatever kept the runs from being created, does not
+  # replay past events. A run started this way builds the Docker image but does not
+  # push it, since the steps that publish it are limited to push events.
+  workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # `uv run` would otherwise sync again without the extra, and swap the CPU build of
+      # PyTorch for the one with the NVIDIA libraries.
+      UV_NO_SYNC: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +28,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra cpu
 
       - name: Lint
         run: |

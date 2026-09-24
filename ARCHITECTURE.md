@@ -103,6 +103,10 @@ Court metres: origin at the centre of the net, `x` across (right as seen from th
 
 The scoreboard gives the games at every changeover (`labels/games_2024-11-10_match.csv`, read off the video by hand). Two players are found (before the fix, the identity stage counted a track ending as its replacement started as a third person and made four), and the identity stage takes 40 s instead of 51 min. 229 points and 52 faults are found for 21 true games. Decoded game by game from server runs, the score agreed with the scoreboard at 5 of 12 moments and was 2.5 games off on average: one deuce game at 6-5 went to the wrong player, so the set closed 7-5 and the real tiebreak was read as games of the next set. The whole-match decoder, which checks each serve's player, end and service box against the rules, finds the tiebreak and the set lost 6-7 and is 0.92 games off on average (4 of 12 exact); the second set comes out 3-6 where it was won 6-3, because two game winners rest on point winners that are wrong. The point winners remain the limit: the ball is a few pixels at 720p and mostly lost, so almost every point ends "unknown", and a game between two players goes to the wrong one now and then.
 
+### Review player
+
+The browser draws the overlays itself, on a canvas over the proxy video; nothing is rendered into the video. `GET /api/videos/<id>/overlay` gives what holds for the whole video (its size, the court lines and every bounce projected to pixels, which track is which player). `GET /api/videos/<id>/tracks?start=&end=` gives ball, poses and feet from the stage files in slices (`tennis/api/tracks.py`; PTS seconds, source pixels, gzipped, about 20 KB per ten seconds). What counts as an error is decided in one place, `web/src/review.ts`: a shot whose flight ended in the net or outside the lines; for serves, a fault or double fault.
+
 **Times in the database are session seconds.** A video's PTS `t` is at session time `t + offset_s`.
 
 ## Paths

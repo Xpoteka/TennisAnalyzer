@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,12 +11,13 @@ from typing import Any
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlmodel import Session as DbSession
 from sqlmodel import col, delete, select
 
 from tennis import worker
+from tennis.api import tracks
 from tennis.api.app import AppState, get_state
 from tennis.api.uploads import VIDEO_SUFFIXES, delete_video, list_videos
 from tennis.config import DEFAULT_CONFIG_NAME, Config
@@ -335,7 +338,23 @@ def list_shots(session_id: int, db: DbSession = Db) -> list[dict[str, Any]]:
     ids = [s.id for s in shots]
     for m in db.exec(select(ShotMetric).where(col(ShotMetric.shot_id).in_(ids))):
         metrics.setdefault(m.shot_id, {})[m.name] = m.value
-    return [{**s.model_dump(), "metrics": metrics.get(s.id or 0, {})} for s in shots]
+    return [
+        {
+            **s.model_dump(),
+            "outcome": s.outcome or _outcome(s),
+            "metrics": metrics.get(s.id or 0, {}),
+        }
+        for s in shots
+    ]
+
+
+def _outcome(s: Shot) -> str | None:
+    """How the shot ended, from its measured flight: net, out, in, or not known."""
+    if (s.quality or {}).get("crosses_net") is False:
+        return "net"
+    if s.in_court is None:
+        return None
+    return "in" if s.in_court else "out"
 
 
 @router.get("/sessions/{session_id}/rallies")
@@ -356,6 +375,50 @@ def video_proxy(video_id: int, state: AppState = State) -> FileResponse:
     if not path.exists():
         raise HTTPException(404, "this video has no playable copy yet")
     return FileResponse(path, media_type="video/mp4")
+
+
+@router.get("/videos/{video_id}/overlay")
+def video_overlay(video_id: int, db: DbSession = Db, state: AppState = State) -> dict[str, Any]:
+    """What stays the same over a whole video: its size, court lines, tracks and bounces."""
+    video = db.get(Video, video_id)
+    if video is None:
+        raise HTTPException(404, "no such video")
+    identities = session_dir(state.data_root, video.session_id) / "identities.json"
+    labels: dict[str, str] = (
+        read_json(identities).get("tracks", {}).get(str(video_id), {})
+        if identities.is_file()
+        else {}
+    )
+    player_of = {
+        sp.label: sp.player_id
+        for sp in db.exec(select(SessionPlayer).where(SessionPlayer.session_id == video.session_id))
+    }
+    shots = db.exec(
+        select(Shot).where(Shot.video_id == video_id, col(Shot.bounce_x).is_not(None))
+    ).all()
+    pixels = tracks.court_points(
+        video.court, [(s.bounce_x or 0.0, s.bounce_y or 0.0) for s in shots]
+    )
+    return {
+        "width": video.width,
+        "height": video.height,
+        "court": tracks.court_outline(video.court),
+        "players": {t: player_of[lb] for t, lb in labels.items() if lb in player_of},
+        "bounces": {str(s.id): px for s, px in zip(shots, pixels, strict=True) if px is not None},
+    }
+
+
+@router.get("/videos/{video_id}/tracks")
+def video_tracks(
+    video_id: int, start: float = 0.0, end: float = 10.0, state: AppState = State
+) -> Response:
+    """Ball, poses and feet between two times of the video (PTS seconds)."""
+    directory = video_dir(state.data_root, video_id)
+    if not directory.is_dir() or end <= start:
+        raise HTTPException(404, "nothing to show for this video")
+    # Mostly numbers, so it packs to about a fifth.
+    body = gzip.compress(json.dumps(tracks.tracks_slice(directory, start, end)).encode(), 5)
+    return Response(body, media_type="application/json", headers={"Content-Encoding": "gzip"})
 
 
 MEDIA_ROOTS = ("videos", "sessions", "players")
