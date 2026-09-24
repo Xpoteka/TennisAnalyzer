@@ -46,6 +46,9 @@ NET_HEIGHT_POST = 1.07
 NET_POST_X = 6.40  # the posts stand 0.914 m outside the doubles sidelines
 HALF_L = LENGTH / 2
 HALF_DW = DOUBLES_WIDTH / 2
+# Someone whose usual spot is further outside the sidelines than this is not playing: the
+# bench, a coach by the fence, the next court seen through it.
+HALF_PLAY_W = HALF_DW + 1.5
 HALF_SW = SINGLES_WIDTH / 2
 
 # Painted lines as (x1, y1, x2, y2).

@@ -198,3 +198,17 @@ def test_racket_hand_from_serves() -> None:
     assert racket_hand(lefty) == "left"
     assert racket_hand([swing(10, overhead=True)]) is None  # too little evidence
     assert racket_hand([swing(60) for _ in range(8)]) is None  # no overheads, no vote
+
+
+def test_a_serve_from_inside_the_court_mid_rally_is_a_smash() -> None:
+    from tennis.pipeline.session.shots import not_a_serve_mid_rally
+    from tennis.vision.strokes import StrokeCall
+
+    serve = StrokeCall("serve", None, 0.8, 0.0)
+    behind, inside = (0.5, -12.0), (1.0, -7.0)
+    assert not_a_serve_mid_rally(serve, True, inside).stroke == "serve"  # first hit: a serve
+    assert not_a_serve_mid_rally(serve, False, behind).stroke == "serve"  # restarts the rally
+    assert not_a_serve_mid_rally(serve, False, inside).stroke == "overhead"
+    assert not_a_serve_mid_rally(serve, False, None).stroke == "serve"
+    forehand = StrokeCall("forehand", "topspin", 0.7, 0.3)
+    assert not_a_serve_mid_rally(forehand, False, inside) is forehand

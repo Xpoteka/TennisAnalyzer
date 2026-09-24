@@ -296,6 +296,55 @@ def eval_points(
         print(f"points won by {who}: labelled {truth}, found {found}")
 
 
+@app.command("eval-games")
+def eval_games(
+    session_id: int,
+    labels: Annotated[Path, typer.Option(help="CSV with t, self, other: games won so far")],
+    config: ConfigOpt = None,
+    data_root: DataRootOpt = None,
+    offset: Annotated[float, typer.Option(help="Label clock to session time, seconds")] = 0.0,
+) -> None:
+    """Compare a match's decoded games with a scoreboard read at a few moments.
+
+    Each label row gives the games each player had won by time ``t`` (sets added up). The
+    found player who agrees best with ``self`` is taken as self.
+    """
+    from sqlmodel import col, select
+
+    from tennis.db import session_scope
+    from tennis.db.models import Rally, Session, SessionPlayer
+    from tennis.evaluation import evaluate_games, parse_time, read_labels
+
+    _cfg, root = _load(config, data_root)
+    rows = read_labels(labels)
+    if not rows:
+        raise UserError(f"{labels} has no labels")
+    with session_scope(root) as db:
+        session = db.get(Session, session_id)
+        rallies = [
+            r
+            for r in db.exec(
+                select(Rally).where(Rally.session_id == session_id).order_by(col(Rally.start_s))
+            )
+            if r.score_before is not None
+        ]
+        players = sorted(
+            db.exec(select(SessionPlayer).where(SessionPlayer.session_id == session_id)),
+            key=lambda p: p.label,
+        )
+        score = (session.summary.get("score") if session is not None else None) or {}
+    if len(players) != 2 or not rallies:
+        print("no decoded match: players", len(players), "points", len(rallies))
+        return
+    checkpoints = [(parse_time(r["t"]) + offset, int(r["self"]), int(r["other"])) for r in rows]
+    report = evaluate_games(
+        [(r.start_s, str((r.score_before or {}).get("text") or "")) for r in rallies],
+        checkpoints,
+        final=str(score.get("text") or ""),
+    )
+    print(report.text())
+
+
 @app.command("run-job", hidden=True)
 def run_job(job_id: int, config: ConfigOpt = None, data_root: DataRootOpt = None) -> None:
     """Run one queued job (the worker starts this in a subprocess)."""

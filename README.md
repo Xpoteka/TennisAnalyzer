@@ -8,7 +8,7 @@ Drop in the videos of a tennis session, training or match. The app works out whi
 
 It recognises the players by itself and keeps a profile for each one. The profile holds their stats across sessions and an analysis of their technique.
 
-**Status: v2 in progress** (branch `v2`). Working: uploads, the job queue, playback, court and camera, player and ball tracking, hits, strokes, ball speed/height/placement, training vs match, score keeping (point winners are still unreliable), player profiles recognised across sessions with technique analysis and trends, and several videos per session (lined up by sound). Accuracy on a labelled match is in [ARCHITECTURE.md](ARCHITECTURE.md).
+**Status: v2 in progress** (branch `v2`). Working: uploads, the job queue, playback, court and camera, player and ball tracking, hits, strokes, ball speed/height/placement, training vs match, score keeping (games and tiebreaks from the rhythm of serves and end changes; point winners are still unreliable: about 64% on a labelled match), player profiles recognised across sessions with technique analysis and trends, and several videos per session (lined up by sound). Accuracy on a labelled match is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Run it
 
@@ -61,6 +61,7 @@ Analyses run one at a time in the background, in a separate process. They surviv
 ```text
 tennis serve [--host H --port P --password-file F]   # the app and its analysis worker
 tennis analyze VIDEO... [--session ID] [--force]     # analyse in this terminal, no server
+tennis eval-hits | eval-shots | eval-points | eval-games   # compare with label files (see labels/README.md)
 ```
 
 Data lives in `data/` (or `paths.data_root` in `config.yaml`):

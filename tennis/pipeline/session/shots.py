@@ -3,8 +3,15 @@
 For each video: the hits become shots. The hitter's track gives the player (through
 ``identities.json``); the swing gives the stroke (:mod:`tennis.vision.strokes`); the ball
 detections between this hit and the next give the flight (:mod:`tennis.vision.physics`)
-when the court and camera are known. Hits less than ``RALLY_GAP_S`` apart form a rally, and
-a serve always starts a new one.
+when the court and camera are known.
+
+Rallies: hits less than ``RALLY_GAP_S`` apart form a rally. A longer gap still continues the
+rally when the next hit comes from the same side of the net, up to ``MISSED_HIT_GAP_S``: one
+hit in between was missed. A serve always starts a new rally. The swing tells a serve (the
+wrist above the head) unless it is hit from inside the court mid-rally, which makes it a
+smash. When the swing cannot tell, as often for the small far player, the first hit of a
+rally counts as a serve when it is hit from behind the baseline near the centre after a
+pause: in a match nothing else is hit from there.
 
 Rows in the ``shot`` and ``rally`` tables for the session are replaced.
 """
@@ -26,13 +33,18 @@ from tennis.db.models import Player, Rally, SessionPlayer, Shot, ShotMetric
 from tennis.util.io import read_json
 from tennis.vision import court as court_mod
 from tennis.vision.physics import ShotFlight, fit_flight
-from tennis.vision.strokes import KP, Swing, classify, racket_hand
+from tennis.vision.strokes import KP, StrokeCall, Swing, classify, racket_hand
 
 if TYPE_CHECKING:
     from tennis.pipeline.session import SessionContext, VideoInfo
 
 MAX_FLIGHT_S = 2.2
 RALLY_GAP_S = 3.0  # longer between two hits: the rally is over
+MISSED_HIT_GAP_S = 5.0  # unless the next hit is from the same side: one hit was missed
+# A first hit from behind the baseline, near the centre mark, after a pause is a serve.
+SERVE_PAUSE_S = 5.0
+SERVE_MIN_DEPTH_M = 10.5
+SERVE_MAX_X_M = 4.5
 MIN_SPEED_KMH, MAX_SPEED_KMH = 15.0, 260.0
 # Plausible speed off the racket per stroke; outside, the fit latched onto the wrong ball.
 SPEED_RANGE_KMH = {
@@ -180,12 +192,40 @@ def contact_point(
     return np.array([x[0], x[1], min(3.3, x[2] + (0.35 if overhead else 0.1))])
 
 
+LAST_SHOT_WINDOWS_S = (0.8, 1.1, 1.5, MAX_FLIGHT_S)
+
+
 def flight_for(
     vd: VideoData, t_hit: float, t_next: float | None, p0: np.ndarray, toward_y: float
 ) -> ShotFlight | None:
+    """The fitted flight from this hit to the next, or None when nothing fits.
+
+    The last shot of a rally has no next hit. Its ball goes on after the bounce, into the
+    net, the fence or a player's hand, which the one-bounce model cannot follow, so the
+    window is shortened until the flight fits: the shortest window that still shows the
+    bounce wins, since the bounce is what says whether the ball was in.
+    """
     if vd.cal is None or not vd.cal.has_camera or not len(vd.ball_t):
         return None
-    end = min(t_next - 0.03 if t_next is not None else t_hit + MAX_FLIGHT_S, t_hit + MAX_FLIGHT_S)
+    if t_next is not None:
+        end = min(t_next - 0.03, t_hit + MAX_FLIGHT_S)
+        return _fit_window(vd, t_hit, end, p0, toward_y)
+    best: ShotFlight | None = None
+    for window in LAST_SHOT_WINDOWS_S:
+        fit = _fit_window(vd, t_hit, t_hit + window, p0, toward_y)
+        if fit is None:
+            continue
+        if fit.bounce_seen:
+            return fit
+        if best is None or fit.rms_px < best.rms_px:
+            best = fit
+    return best
+
+
+def _fit_window(
+    vd: VideoData, t_hit: float, end: float, p0: np.ndarray, toward_y: float
+) -> ShotFlight | None:
+    assert vd.cal is not None
     m = (vd.ball_t > t_hit + 0.02) & (vd.ball_t < end)
     if m.sum() < 5:
         return None
@@ -238,6 +278,43 @@ def placement(
     return out
 
 
+def continues_rally(gap: float, side: int | None, prev_side: int | None) -> bool:
+    """Does a hit ``gap`` seconds after the previous one belong to the same rally?"""
+    if gap <= RALLY_GAP_S:
+        return True
+    return gap <= MISSED_HIT_GAP_S and side is not None and side == prev_side
+
+
+def not_a_serve_mid_rally(
+    call: StrokeCall, first: bool, feet: tuple[float, float] | None
+) -> StrokeCall:
+    """A "serve" in the middle of a rally, hit from inside the court, is a smash.
+
+    A wrist above the head looks like a serve to the swing classifier, and so does a lob
+    being smashed. Nobody serves from inside the baseline, so a serve call from there is a
+    smash and the rally goes on. From behind the baseline it stays a serve and restarts the
+    rally, even right after other hits: between points the hit detector often finds a hit
+    or two in the players' waiting movements and ball bounces, and in a labelled match
+    nearly half the serves followed such hits within a couple of seconds. A lob smashed
+    from behind the baseline is the rare case that still cuts a rally.
+    """
+    if call.stroke != "serve" or first or feet is None:
+        return call
+    if abs(feet[1]) < SERVE_MIN_DEPTH_M:
+        return StrokeCall("overhead", None, call.confidence, call.lateral)
+    return call
+
+
+def serve_position(feet: tuple[float, float] | None, gap: float) -> bool:
+    """Hit from behind the baseline near the centre mark, after a pause: a serve."""
+    return (
+        feet is not None
+        and gap >= SERVE_PAUSE_S
+        and abs(feet[1]) >= SERVE_MIN_DEPTH_M
+        and abs(feet[0]) <= SERVE_MAX_X_M
+    )
+
+
 def run(ctx: SessionContext) -> None:
     identities = read_json(ctx.dir / "identities.json")
     doubles = len(identities.get("players", {})) >= 4
@@ -264,18 +341,20 @@ def run(ctx: SessionContext) -> None:
         times = vd.hits["t"]
         n = len(times)
         rally_start = 0
+        prev_side: int | None = None
         for i in range(n):
             t = float(times[i])
-            if i > 0 and t - float(times[i - 1]) > RALLY_GAP_S:
+            track = int(vd.hits["track"][i])
+            side = int(vd.hits["side"][i])
+            gap = t - float(times[i - 1]) if i > 0 else float("inf")
+            if i > 0 and not continues_rally(gap, side, prev_side):
                 rally_start = i
             first = i == rally_start
             t_next = (
                 float(times[i + 1])
-                if i + 1 < n and float(times[i + 1]) - t <= RALLY_GAP_S
+                if i + 1 < n and float(times[i + 1]) - t <= MISSED_HIT_GAP_S
                 else None
             )
-            track = int(vd.hits["track"][i])
-            side = int(vd.hits["side"][i])
             label = vd.labels.get(track)
             feet = feet_at(vd, track, t)
             sw = vd.swings.get(i)
@@ -287,9 +366,16 @@ def run(ctx: SessionContext) -> None:
                 first_in_rally=first,
                 distance_from_net_m=abs(feet[1]) if feet is not None else None,
             )
-            if call.stroke == "serve" and not first:
-                # A serve always starts a rally (the hits before it were not part of it).
-                rally_start = i
+            serve_by = "swing" if call.stroke == "serve" else None
+            if call.stroke != "serve" and first and serve_position(feet, gap):
+                call = StrokeCall("serve", None, 0.5, call.lateral)
+                serve_by = "position"
+            call = not_a_serve_mid_rally(call, first, feet)
+            prev_side = side
+            if call.stroke != "serve":
+                serve_by = None
+            elif not first:
+                rally_start = i  # a serve always starts a rally
             toward_y = 1.0 if side < 0 else -1.0
             row: dict[str, Any] = {
                 "video": vd.info.id,
@@ -300,9 +386,14 @@ def run(ctx: SessionContext) -> None:
                 "spin": call.spin,
                 "stroke_confidence": round(call.confidence, 3),
                 "sources": list(vd.hits["sources"][i]),
-                "quality": {"hit_score": round(float(vd.hits["score"][i]), 3)},
+                "quality": {
+                    "hit_score": round(float(vd.hits["score"][i]), 3),
+                    "sound": bool(vd.hits["sound"][i]) if "sound" in vd.hits else True,
+                },
                 "metrics": {},
             }
+            if serve_by:
+                row["quality"]["serve_by"] = serve_by
             if feet is not None:
                 row["hit_x"], row["hit_y"] = feet
                 overhead = call.stroke in ("serve", "overhead")
@@ -453,14 +544,18 @@ def merge_views(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def resegment(shots: list[dict[str, Any]]) -> None:
-    """Rallies on the session clock: a serve starts one, a pause of ``RALLY_GAP_S`` ends one."""
+    """Rallies on the session clock: a serve starts one, a pause ends one (see the module)."""
     rally = -1
     prev_t = None
+    prev_side: int | None = None
     for r in shots:
-        if prev_t is None or r["t"] - prev_t > RALLY_GAP_S or r["stroke"] == "serve":
+        side = -1 if (r.get("hit_y") or 0) < 0 else 1 if r.get("hit_y") is not None else None
+        gap = r["t"] - prev_t if prev_t is not None else float("inf")
+        if prev_t is None or r["stroke"] == "serve" or not continues_rally(gap, side, prev_side):
             rally += 1
         r["rally_key"] = (0, rally)
         prev_t = r["t"]
+        prev_side = side
 
 
 def add_movement_metrics(vd: VideoData, rows: list[dict[str, Any]]) -> None:

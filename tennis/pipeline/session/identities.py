@@ -1,10 +1,14 @@
 """Session stage ``identities``: who the players are, as opposed to the tracks.
 
 The tracker's tracks break whenever a player is lost for a moment, and players change ends.
-Tracks are joined into players by clothing colour, under one hard rule: two tracks seen at
-the same time are different people. Of the joined groups, the ones that hit the ball or
-spend a good share of the session on court are the players; the rest (ball kids, people
-walking past, a coach) are ignored.
+Tracks are joined into players under one hard rule: two tracks seen at the same time are
+different people. People off the court (on the bench, on the next court, walking past) are
+not players and are left out first.
+
+For singles, that rule alone chains through the session: the near track is not the far
+track, which is not the next near track, so the near tracks are one person. For doubles,
+tracks are joined by clothing colour instead, and the groups that hit the ball or spend a
+good share of the session on court are the players.
 
 This stage creates the session's players (A, B, ...). Matching them to profiles from other
 sessions happens in the ``players`` stage; until it has run, each session gets its own.
@@ -14,12 +18,12 @@ Writes ``sessions/<id>/identities.json``: per video, which track belongs to whic
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
-import numpy.typing as npt
 import pyarrow.parquet as pq
 from sqlmodel import select
 
@@ -28,11 +32,10 @@ from tennis.db.models import Player, SessionPlayer
 from tennis.util.appearance import distance
 from tennis.util.io import atomic_path, write_json
 from tennis.util.video import grab_frame
+from tennis.vision import court as court_mod
 
 if TYPE_CHECKING:
     from tennis.pipeline.session import SessionContext, VideoInfo
-
-FloatArray = npt.NDArray[np.float64]
 
 MERGE_MAX_DISTANCE = 0.38  # clothing-colour distance above which tracks are not joined
 OVERLAP_S = 0.5  # tracks seen together for longer than this are different people
@@ -55,6 +58,24 @@ class TrackInfo:
     times: np.ndarray = field(default_factory=lambda: np.zeros(0))
     xy: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))  # court metres, NaN if unknown
 
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+    @property
+    def side(self) -> int:
+        """-1 near, +1 far, 0 unknown (no court)."""
+        y = self.xy[:, 1]
+        y = y[np.isfinite(y)]
+        if len(y) == 0:
+            return 0
+        return 1 if float(np.median(y)) > 0 else -1
+
+    def is_bystander(self) -> bool:
+        x = self.xy[:, 0]
+        x = x[np.isfinite(x)]
+        return len(x) > 0 and float(np.median(np.abs(x))) > court_mod.HALF_PLAY_W
+
 
 @dataclass
 class Group:
@@ -73,19 +94,6 @@ class Group:
     def hits(self) -> int:
         return sum(t.hits for t in self.tracks)
 
-    def overlaps(self, other: Group) -> bool:
-        for a in self.tracks:
-            for b in other.tracks:
-                if a.video != b.video:
-                    continue
-                if min(a.end, b.end) - max(a.start, b.start) <= OVERLAP_S:
-                    continue
-                # Their spans overlap: were they really seen at the same moments?
-                both = np.intersect1d(np.round(a.times, 1), np.round(b.times, 1))
-                if len(both) * 0.1 > OVERLAP_S:
-                    return True
-        return False
-
 
 def load_tracks(v: VideoInfo) -> list[TrackInfo]:
     d = pq.read_table(
@@ -98,7 +106,10 @@ def load_tracks(v: VideoInfo) -> list[TrackInfo]:
         ],
         np.float64,
     ).reshape(-1, 2)
-    hits = pq.read_table(v.path("hits.parquet"), columns=["track"]).column("track").to_pylist()
+    hit_tracks = pq.read_table(v.path("hits.parquet"), columns=["track"]).column("track")
+    hits_of: dict[int, int] = defaultdict(int)
+    for k in hit_tracks.to_pylist():
+        hits_of[int(k)] += 1
     ids = np.asarray(d["track_id"])
     times = np.asarray(d["t"], np.float64) + v.offset_s
     looks = np.asarray(d["appearance"], np.float64) if d["appearance"] else np.zeros((0, 1))
@@ -116,12 +127,108 @@ def load_tracks(v: VideoInfo) -> list[TrackInfo]:
                 end=float(times[m].max()),
                 samples=int(m.sum()),
                 appearance=np.median(looks[m], axis=0),
-                hits=sum(1 for h in hits if h == tid),
+                hits=hits_of.get(int(tid), 0),
                 times=times[m][order],
                 xy=xy_all[m][order],
             )
         )
     return out
+
+
+def seen_together(tracks: list[TrackInfo]) -> np.ndarray:
+    """Seconds during which each pair of tracks was seen in the same frames (same video).
+
+    Built frame by frame: a frame holds a handful of people, so this is linear in the number
+    of samples rather than quadratic in the number of tracks.
+    """
+    n = len(tracks)
+    together = np.zeros((n, n))
+    by_video: dict[int, list[int]] = defaultdict(list)
+    for i, tr in enumerate(tracks):
+        by_video[tr.video].append(i)
+    for members in by_video.values():
+        at: dict[float, list[int]] = defaultdict(list)
+        for i in members:
+            for t in tracks[i].times:
+                at[round(float(t), 3)].append(i)
+        stamps = np.array(sorted(at))
+        step = float(np.median(np.diff(stamps))) if len(stamps) > 1 else 0.1
+        step = min(max(step, 0.01), 1.0)
+        for present in at.values():
+            for a in range(len(present)):
+                for b in range(a + 1, len(present)):
+                    together[present[a], present[b]] += step
+                    together[present[b], present[a]] += step
+    return together
+
+
+def cluster(tracks: list[TrackInfo], together: np.ndarray) -> list[Group]:
+    """Greedy agglomeration: join the most similar pair that never appears together."""
+    n = len(tracks)
+    if n == 0:
+        return []
+    looks = np.array([t.appearance for t in tracks], np.float64)
+    weights = np.array([t.samples for t in tracks], np.float64)
+    conflict = together > OVERLAP_S
+    alive = np.ones(n, bool)
+    members: list[list[int]] = [[i] for i in range(n)]
+
+    def dist_row(i: int) -> np.ndarray:
+        a = np.clip(looks[i], 0, None)
+        b = np.clip(looks, 0, None)
+        sa, sb = a.sum(), b.sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bc = np.sqrt(a / sa * b / sb[:, None]).sum(axis=1)
+        d = np.sqrt(np.clip(1.0 - bc, 0.0, None))
+        d[(sa <= 0) | (sb <= 0)] = 1.0
+        return np.asarray(d)
+
+    dist = np.stack([dist_row(i) for i in range(n)]) if n else np.zeros((0, 0))
+    np.fill_diagonal(dist, np.inf)
+    while True:
+        cand = dist.copy()
+        cand[conflict] = np.inf
+        cand[~alive] = np.inf
+        cand[:, ~alive] = np.inf
+        k = int(np.argmin(cand))
+        i, j = divmod(k, n)
+        if not np.isfinite(cand[i, j]) or cand[i, j] > MERGE_MAX_DISTANCE:
+            break
+        members[i].extend(members[j])
+        alive[j] = False
+        looks[i] = np.average(looks[members[i]], axis=0, weights=weights[members[i]])
+        conflict[i] |= conflict[j]
+        conflict[:, i] |= conflict[:, j]
+        row = dist_row(i)
+        dist[i] = row
+        dist[:, i] = row
+        dist[i, i] = np.inf
+    return [Group([tracks[i] for i in members[k]]) for k in range(n) if alive[k]]
+
+
+MIN_SINGLES_TRACK_S = 2.0
+
+
+def concurrent_players(tracks: list[TrackInfo]) -> int:
+    """How many people are usually on court at the same time (2 singles, 4 doubles).
+
+    Counted per analysed frame, so a track ending as its replacement starts is not two
+    people. The 90th percentile ignores the occasional ball retrieved by someone else.
+    """
+    counts: list[int] = []
+    by_video: dict[int, list[TrackInfo]] = defaultdict(list)
+    for tr in tracks:
+        if tr.duration >= MIN_SINGLES_TRACK_S or tr.hits >= 2:
+            by_video[tr.video].append(tr)
+    for members in by_video.values():
+        at: dict[float, int] = defaultdict(int)
+        for tr in members:
+            for t in tr.times:
+                at[round(float(t), 3)] += 1
+        counts.extend(at.values())
+    if not counts:
+        return 0
+    return int(np.clip(np.percentile(counts, 90), 1, MAX_PLAYERS))
 
 
 SAME_PLACE_M = 1.5
@@ -155,97 +262,7 @@ def same_place(a: TrackInfo, b: TrackInfo) -> tuple[str, float] | None:
     return None
 
 
-def seen_together_matrix(tracks: list[TrackInfo]) -> npt.NDArray[np.bool_]:
-    """Which pairs of tracks were really seen at the same moments (so are different people)."""
-    n = len(tracks)
-    video = np.array([t.video for t in tracks])
-    start = np.array([t.start for t in tracks])
-    end = np.array([t.end for t in tracks])
-    shared = np.minimum(end[:, None], end[None, :]) - np.maximum(start[:, None], start[None, :])
-    together = np.zeros((n, n), bool)
-    # Only tracks of one video whose spans overlap need the look at their samples.
-    for i, j in np.argwhere(np.triu((shared > OVERLAP_S) & (video[:, None] == video), 1)):
-        if seen_together(tracks[i], tracks[j]) > OVERLAP_S:
-            together[i, j] = together[j, i] = True
-    return together
-
-
-def cluster(tracks: list[TrackInfo]) -> list[Group]:
-    """Greedy agglomeration: join the most similar pair that never appears together.
-
-    A long match has a thousand tracks and almost as many joins, so the distances between
-    all groups are kept in one matrix, and a join only redoes the joined group's row.
-    """
-    n = len(tracks)
-    if n < 2:
-        return [Group([t]) for t in tracks]
-    members: list[list[TrackInfo] | None] = [[t] for t in tracks]
-    weight = np.array([t.samples for t in tracks], np.float64)
-    looks = np.array([t.appearance for t in tracks], np.float64)
-    apart = seen_together_matrix(tracks)
-    upper = np.triu(np.ones((n, n), bool), 1)
-
-    def distances(i: int) -> FloatArray:
-        """Hellinger distance (``appearance.distance``) from group ``i`` to every group."""
-        p = np.clip(looks, 0, None)
-        total = p.sum(axis=1)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            root = np.sqrt(p / total[:, None])
-        d = np.sqrt(np.clip(1.0 - root @ root[i], 0, None))
-        d[(total <= 0) | (total[i] <= 0)] = 1.0
-        return np.asarray(d)
-
-    dist = np.stack([distances(i) for i in range(n)])
-    alive = np.ones(n, bool)
-    while True:
-        ok = upper & ~apart & (dist <= MERGE_MAX_DISTANCE) & alive[:, None] & alive[None, :]
-        if not ok.any():
-            return [Group(m) for m in members if m is not None]
-        # The first of the closest pairs, in the order the groups were made.
-        i, j = divmod(int(np.argmin(np.where(ok, dist, np.inf))), n)
-        merged, gone = members[i], members[j]
-        assert merged is not None and gone is not None
-        members[i], members[j] = merged + gone, None
-        looks[i] = (weight[i] * looks[i] + weight[j] * looks[j]) / (weight[i] + weight[j])
-        weight[i] += weight[j]
-        alive[j] = False
-        apart[i] |= apart[j]
-        apart[:, i] |= apart[:, j]
-        dist[i] = dist[:, i] = distances(i)
-
-
-SIGNIFICANT_S = 8.0  # groups on court for less than this are not considered players
-
-
-def concurrent_players(groups: list[Group]) -> int:
-    """How many significant groups are usually seen at the same time (2 singles, 4 doubles)."""
-    sig = [g for g in groups if g.duration >= SIGNIFICANT_S or g.hits >= 3]
-    if not sig:
-        return 0
-    stamps: dict[tuple[int, float], int] = {}
-    for g in sig:
-        seen = set()
-        for tr in g.tracks:
-            for t in np.round(tr.times):
-                seen.add((tr.video, float(t)))
-        for key in seen:
-            stamps[key] = stamps.get(key, 0) + 1
-    counts = np.array(list(stamps.values()))
-    return int(np.clip(np.percentile(counts, 90), 1, MAX_PLAYERS))
-
-
-MIN_SINGLES_TRACK_S = 2.0
-
-
-def seen_together(a: TrackInfo, b: TrackInfo) -> float:
-    """Seconds during which both tracks were seen (same video, same samples)."""
-    if a.video != b.video or min(a.end, b.end) <= max(a.start, b.start):
-        return 0.0
-    both = np.intersect1d(np.round(a.times, 1), np.round(b.times, 1))
-    return len(both) * 0.1
-
-
-def two_players(tracks: list[TrackInfo]) -> list[Group]:
+def two_players(tracks: list[TrackInfo], together: np.ndarray | None = None) -> list[Group]:
     """Singles: split the tracks into two players.
 
     Two tracks seen at the same time are different people. With two players on court that
@@ -255,16 +272,25 @@ def two_players(tracks: list[TrackInfo]) -> list[Group]:
     person. The chain is taken along a maximum spanning tree of these relations (weighted by
     seconds), so a short spell with a third person (a ball kid) or a tracker mix-up cannot
     flip it. Parts that never meet are matched to each other by clothing colour.
+
+    Tracks too short to take part are then given to the player who was on their side of the
+    court at the time (:func:`assign_by_side`).
     """
-    tr = [t for t in tracks if t.end - t.start >= MIN_SINGLES_TRACK_S or t.hits >= 2]
+    if together is None:
+        together = seen_together(tracks)
+    keep = [i for i, t in enumerate(tracks) if t.duration >= MIN_SINGLES_TRACK_S or t.hits >= 2]
+    tr = [tracks[i] for i in keep]
     n = len(tr)
     # (weight, i, j, parity): parity 1 = different people, 0 = the same person.
     edges: list[tuple[float, int, int, int]] = []
+    sub = together[np.ix_(keep, keep)]
     for i in range(n):
         for j in range(i + 1, n):
-            w = seen_together(tr[i], tr[j])
+            w = float(sub[i, j])
             if w > OVERLAP_S:
                 edges.append((w, i, j, 1))
+                continue
+            if tr[i].video == tr[j].video:
                 continue
             relation = same_place(tr[i], tr[j])
             if relation is not None:
@@ -308,7 +334,49 @@ def two_players(tracks: list[TrackInfo]) -> list[Group]:
         flip = int(np.argmin(costs))
         for i in part:
             players[colour[i] ^ flip].append(tr[i])
-    return [Group(p) for p in players if p]
+    groups = [Group(p) for p in players if p]
+    rest = [tracks[i] for i in range(len(tracks)) if i not in set(keep)]
+    assign_by_side(groups, rest)
+    return groups
+
+
+SIDE_WINDOW_S = 90.0  # players keep their end of the court for at least a couple of games
+
+
+def assign_by_side(players: list[Group], rest: list[TrackInfo]) -> None:
+    """Give each leftover track to the player who was on its side of the court then.
+
+    In singles, a player keeps one end between changeovers, so the side of the court at a
+    given moment identifies the player. A track without a court position stays unassigned.
+    """
+    if len(players) != 2:
+        return
+    timelines: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for g in players:
+        stamps: list[float] = []
+        sides: list[int] = []
+        videos: list[int] = []
+        for tr in g.tracks:
+            s = tr.side
+            if s == 0:
+                continue
+            sample = tr.times[::5]
+            stamps.extend(sample.tolist())
+            sides.extend([s] * len(sample))
+            videos.extend([tr.video] * len(sample))
+        timelines.append((np.array(stamps), np.array(sides), np.array(videos)))
+    for tr in rest:
+        s = tr.side
+        if s == 0:
+            continue
+        mid = (tr.start + tr.end) / 2
+        votes = []
+        for stamps_a, sides_a, videos_a in timelines:
+            m = (np.abs(stamps_a - mid) <= SIDE_WINDOW_S) & (videos_a == tr.video)
+            votes.append(float(np.mean(sides_a[m] == s)) if m.any() else 0.0)
+        best = int(np.argmax(votes))
+        if votes[best] >= 0.6 and votes[best] > votes[1 - best]:
+            players[best].tracks.append(tr)
 
 
 def pick_players(groups: list[Group], session_s: float) -> list[Group]:
@@ -325,17 +393,32 @@ def pick_players(groups: list[Group], session_s: float) -> list[Group]:
     return players
 
 
+def find_players(tracks: list[TrackInfo]) -> tuple[list[Group], int]:
+    """The session's players from every track, and how many people were usually on court."""
+    playing = [t for t in tracks if not t.is_bystander()]
+    concurrent = concurrent_players(playing)
+    if concurrent <= 2:
+        players = two_players(playing)
+        players.sort(key=lambda g: min(t.start for t in g.tracks))  # A is seen first
+        return players, concurrent
+    session_s = max((t.end for t in playing), default=0.0) - min(
+        (t.start for t in playing), default=0.0
+    )
+    groups = cluster(playing, seen_together(playing))
+    return pick_players(groups, max(session_s, 1.0)), concurrent
+
+
 def save_thumbnail(ctx: SessionContext, label: str, group: Group) -> str | None:
     """A crop of the player from the moment their box was largest."""
     best: tuple[float, VideoInfo, float, list[float]] | None = None
     videos = {v.id: v for v in ctx.videos}
-    for tr in group.tracks:
-        v = videos[tr.video]
+    wanted = {(tr.video, tr.id) for tr in group.tracks}
+    for v in videos.values():
         d = pq.read_table(
             v.path("people.parquet"), columns=["t", "track_id", "x1", "y1", "x2", "y2", "conf"]
         ).to_pydict()
         for t, k, x1, y1, x2, y2, c in zip(*(d[c] for c in d), strict=True):
-            if k != tr.id or c < 0.5:
+            if (v.id, int(k)) not in wanted or c < 0.5:
                 continue
             area = (x2 - x1) * (y2 - y1)
             if best is None or area > best[0]:
@@ -371,17 +454,23 @@ def save_thumbnail(ctx: SessionContext, label: str, group: Group) -> str | None:
     return rel
 
 
+def _drop_if_orphan(db: Any, player_id: int) -> None:
+    """Remove an automatic profile that no session refers to any more.
+
+    A profile the user renamed or merged is kept: it may hold a name worth keeping, and the
+    ``players`` stage only cleans up profiles it touched itself.
+    """
+    profile = db.get(Player, player_id)
+    if profile is None or not profile.name.startswith("Player ") or profile.merged_into:
+        return
+    still_used = db.exec(select(SessionPlayer).where(SessionPlayer.player_id == player_id)).first()
+    if still_used is None:
+        db.delete(profile)
+
+
 def run(ctx: SessionContext) -> None:
     tracks = [t for v in ctx.videos for t in load_tracks(v)]
-    session_s = max((t.end for t in tracks), default=0.0) - min(
-        (t.start for t in tracks), default=0.0
-    )
-    groups = cluster(tracks)
-    if concurrent_players(groups) <= 2:
-        players = two_players(tracks)
-        players.sort(key=lambda g: min(t.start for t in g.tracks))  # A is seen first
-    else:
-        players = pick_players(groups, max(session_s, 1.0))
+    players, concurrent = find_players(tracks)
     mapping: dict[str, dict[str, str]] = {}
     labels: dict[str, dict[str, Any]] = {}
     for label, g in zip(LABELS, players, strict=False):
@@ -393,7 +482,10 @@ def run(ctx: SessionContext) -> None:
             "on_court_s": round(g.duration, 1),
             "tracks": len(g.tracks),
         }
-    write_json(ctx.dir / "identities.json", {"tracks": mapping, "players": labels})
+    write_json(
+        ctx.dir / "identities.json",
+        {"tracks": mapping, "players": labels, "concurrent": concurrent},
+    )
 
     with session_scope(ctx.data_root) as db:
         existing = {
@@ -420,4 +512,12 @@ def run(ctx: SessionContext) -> None:
                 db.add(player_row)
         for sp in existing.values():  # a label that no longer exists
             db.delete(sp)
-    ctx.log("players", count=len(players), groups=len(groups), tracks=len(tracks))
+            db.flush()
+            _drop_if_orphan(db, sp.player_id)
+    ctx.log(
+        "players",
+        count=len(players),
+        concurrent=concurrent,
+        tracks=len(tracks),
+        hits={label: info["hits"] for label, info in labels.items()},
+    )

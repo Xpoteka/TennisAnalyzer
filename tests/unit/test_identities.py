@@ -1,84 +1,94 @@
-"""Joining tracks into players."""
+"""Telling the players apart from the tracks of one video."""
 
 from __future__ import annotations
-
-import time
 
 import numpy as np
 
 from tennis.pipeline.session.identities import (
-    MERGE_MAX_DISTANCE,
-    Group,
     TrackInfo,
-    cluster,
+    assign_by_side,
+    concurrent_players,
+    find_players,
+    two_players,
 )
-from tennis.util.appearance import distance
+
+DARK = np.array([0.1, 0.0, 0.8, 0.1])
+LIGHT = np.array([0.1, 0.0, 0.1, 0.8])
 
 
-def _tracks(n: int, seed: int) -> list[TrackInfo]:
-    """Two players in different colours, seen in turns of a few seconds, with noise."""
-    rng = np.random.default_rng(seed)
-    colours = rng.random((2, 12))
-    out = []
-    for k in range(n):
-        start = (k // 2) * 5.0 + rng.uniform(0, 1)
-        times = np.round(start + np.arange(0, rng.uniform(2, 4), 0.1), 1)
-        look = np.clip(colours[k % 2] + rng.normal(0, 0.08, 12), 0, None)
-        out.append(
-            TrackInfo(
-                video=1,
-                id=k,
-                start=float(times[0]),
-                end=float(times[-1]),
-                samples=len(times),
-                appearance=look,
-                times=times,
-            )
-        )
-    return out
+def track(
+    tid: int, start: float, end: float, y: float, look: np.ndarray, x: float = 0.0, hits: int = 0
+) -> TrackInfo:
+    times = np.round(np.arange(start, end, 0.1), 1)
+    xy = np.column_stack([np.full(len(times), x), np.full(len(times), y)])
+    return TrackInfo(1, tid, start, end, len(times), look, hits, times, xy)
 
 
-def _cluster_slowly(tracks: list[TrackInfo]) -> list[Group]:
-    """The plain version of the same rule: every pair of groups, again after every join."""
-    groups = [Group([t]) for t in tracks]
-    while True:
-        best: tuple[float, int, int] | None = None
-        for i in range(len(groups)):
-            for j in range(i + 1, len(groups)):
-                d = distance(groups[i].appearance, groups[j].appearance)
-                if d > MERGE_MAX_DISTANCE or (best is not None and d >= best[0]):
-                    continue
-                if groups[i].overlaps(groups[j]):
-                    continue
-                best = (d, i, j)
-        if best is None:
-            return groups
-        _, i, j = best
-        groups[i] = Group(groups[i].tracks + groups[j].tracks)
-        del groups[j]
+def test_a_track_replaced_by_the_next_is_not_a_third_person() -> None:
+    # The far player's track breaks every 10 s; the near one's every 15 s.
+    tracks = [track(k, 10.0 * k, 10.0 * (k + 1), 12.0, LIGHT) for k in range(12)]
+    tracks += [track(100 + k, 15.0 * k, 15.0 * (k + 1), -12.0, DARK) for k in range(8)]
+    assert concurrent_players(tracks) == 2
 
 
-def test_cluster_joins_as_the_plain_rule_does() -> None:
-    for seed in range(4):
-        tracks = _tracks(30, seed)
-        fast = [[t.id for t in g.tracks] for g in cluster(tracks)]
-        slow = [[t.id for t in g.tracks] for g in _cluster_slowly(tracks)]
-        assert fast == slow
-        assert len(fast) < 30  # it did join some
+def test_doubles_are_four() -> None:
+    tracks = [track(k, 0.0, 60.0, y, LIGHT, x=x) for k, (x, y) in enumerate([(-3, 12), (3, 12)])]
+    tracks += [
+        track(10 + k, 0.0, 60.0, y, DARK, x=x) for k, (x, y) in enumerate([(-3, -12), (3, -12)])
+    ]
+    assert concurrent_players(tracks) == 4
 
 
-def test_tracks_seen_together_stay_apart() -> None:
-    groups = cluster(_tracks(40, 9))
-    for g in groups:
-        for a in g.tracks:
-            for b in g.tracks:
-                assert a is b or not Group([a]).overlaps(Group([b]))
+def test_singles_chain_through_broken_tracks_and_changeovers() -> None:
+    # Near player A (dark) and far player B (light) for 60 s, then they change ends.
+    tracks = [
+        track(1, 0, 30, -12, DARK), track(2, 0, 30, 12, LIGHT),
+        track(3, 30.5, 60, -12, DARK), track(4, 30.5, 60, 12, LIGHT),
+        track(5, 70, 100, 12, DARK), track(6, 70, 100, -12, LIGHT),
+    ]  # fmt: skip
+    players = two_players(tracks)
+    ids = sorted(sorted(t.id for t in g.tracks) for g in players)
+    assert ids == [[1, 3, 5], [2, 4, 6]]
 
 
-def test_cluster_copes_with_a_long_match() -> None:
-    tracks = _tracks(1200, 3)
-    started = time.monotonic()
-    groups = cluster(tracks)
-    assert time.monotonic() - started < 60
-    assert sum(len(g.tracks) for g in groups) == 1200
-    assert cluster([]) == [] and len(cluster(tracks[:1])) == 1
+def test_bystanders_on_the_bench_are_not_players() -> None:
+    tracks = [
+        track(1, 0, 60, -12, DARK, hits=10),
+        track(2, 0, 60, 12, LIGHT, hits=10),
+        track(3, 0, 60, -6, np.array([0.5, 0.5, 0.0, 0.0]), x=-8.5, hits=3),  # on the bench
+    ]
+    players, concurrent = find_players(tracks)
+    assert concurrent == 2
+    assert len(players) == 2
+    assert all(t.id != 3 for g in players for t in g.tracks)
+
+
+def test_short_tracks_go_to_the_player_on_that_side() -> None:
+    a = track(1, 0, 60, -12, DARK)
+    b = track(2, 0, 60, 12, LIGHT)
+    players = two_players([a, b])
+    stray = track(3, 20, 21, 11, np.zeros(4))  # one second at the far end: player B
+    assign_by_side(players, [stray])
+    owner = next(g for g in players if any(t.id == 2 for t in g.tracks))
+    assert any(t.id == 3 for t in owner.tracks)
+
+
+def test_a_vanished_label_drops_its_unused_profile(data_root) -> None:  # type: ignore[no-untyped-def]
+    from sqlmodel import select
+
+    from tennis.db import session_scope
+    from tennis.db.models import Player, Session, SessionPlayer
+    from tennis.pipeline.session.identities import _drop_if_orphan
+
+    with session_scope(data_root) as db:
+        sess = Session(name="s")
+        auto, named, shared = Player(name="Player 3"), Player(name="Josi"), Player(name="Player 5")
+        db.add_all([sess, auto, named, shared])
+        db.flush()
+        assert sess.id and auto.id and named.id and shared.id
+        db.add(SessionPlayer(session_id=sess.id, player_id=shared.id, label="A"))
+        db.flush()
+        for pid in (auto.id, named.id, shared.id):
+            _drop_if_orphan(db, pid)
+        left = {p.name for p in db.exec(select(Player))}
+    assert left == {"Josi", "Player 5"}

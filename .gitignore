@@ -26,3 +26,6 @@ build/
 # The React build and its dependencies
 web/node_modules/
 tennis/api/static/
+
+# The app data folder when the server is started from web/ (see paths.data_root)
+/web/data/
