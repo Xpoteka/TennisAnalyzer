@@ -8,8 +8,9 @@ when the court and camera are known.
 Rallies: hits less than ``RALLY_GAP_S`` apart form a rally. A longer gap still continues the
 rally when the next hit comes from the same side of the net, up to ``MISSED_HIT_GAP_S``: one
 hit in between was missed. A serve always starts a new rally. The swing tells a serve (the
-wrist above the head); when it cannot, as often for the small far player, the first hit of
-a rally counts as a serve when it is hit from behind the baseline near the centre after a
+wrist above the head) unless it is hit from inside the court mid-rally, which makes it a
+smash. When the swing cannot tell, as often for the small far player, the first hit of a
+rally counts as a serve when it is hit from behind the baseline near the centre after a
 pause: in a match nothing else is hit from there.
 
 Rows in the ``shot`` and ``rally`` tables for the session are replaced.
@@ -191,12 +192,40 @@ def contact_point(
     return np.array([x[0], x[1], min(3.3, x[2] + (0.35 if overhead else 0.1))])
 
 
+LAST_SHOT_WINDOWS_S = (0.8, 1.1, 1.5, MAX_FLIGHT_S)
+
+
 def flight_for(
     vd: VideoData, t_hit: float, t_next: float | None, p0: np.ndarray, toward_y: float
 ) -> ShotFlight | None:
+    """The fitted flight from this hit to the next, or None when nothing fits.
+
+    The last shot of a rally has no next hit. Its ball goes on after the bounce, into the
+    net, the fence or a player's hand, which the one-bounce model cannot follow, so the
+    window is shortened until the flight fits: the shortest window that still shows the
+    bounce wins, since the bounce is what says whether the ball was in.
+    """
     if vd.cal is None or not vd.cal.has_camera or not len(vd.ball_t):
         return None
-    end = min(t_next - 0.03 if t_next is not None else t_hit + MAX_FLIGHT_S, t_hit + MAX_FLIGHT_S)
+    if t_next is not None:
+        end = min(t_next - 0.03, t_hit + MAX_FLIGHT_S)
+        return _fit_window(vd, t_hit, end, p0, toward_y)
+    best: ShotFlight | None = None
+    for window in LAST_SHOT_WINDOWS_S:
+        fit = _fit_window(vd, t_hit, t_hit + window, p0, toward_y)
+        if fit is None:
+            continue
+        if fit.bounce_seen:
+            return fit
+        if best is None or fit.rms_px < best.rms_px:
+            best = fit
+    return best
+
+
+def _fit_window(
+    vd: VideoData, t_hit: float, end: float, p0: np.ndarray, toward_y: float
+) -> ShotFlight | None:
+    assert vd.cal is not None
     m = (vd.ball_t > t_hit + 0.02) & (vd.ball_t < end)
     if m.sum() < 5:
         return None
@@ -256,6 +285,26 @@ def continues_rally(gap: float, side: int | None, prev_side: int | None) -> bool
     return gap <= MISSED_HIT_GAP_S and side is not None and side == prev_side
 
 
+def not_a_serve_mid_rally(
+    call: StrokeCall, first: bool, feet: tuple[float, float] | None
+) -> StrokeCall:
+    """A "serve" in the middle of a rally, hit from inside the court, is a smash.
+
+    A wrist above the head looks like a serve to the swing classifier, and so does a lob
+    being smashed. Nobody serves from inside the baseline, so a serve call from there is a
+    smash and the rally goes on. From behind the baseline it stays a serve and restarts the
+    rally, even right after other hits: between points the hit detector often finds a hit
+    or two in the players' waiting movements and ball bounces, and in a labelled match
+    nearly half the serves followed such hits within a couple of seconds. A lob smashed
+    from behind the baseline is the rare case that still cuts a rally.
+    """
+    if call.stroke != "serve" or first or feet is None:
+        return call
+    if abs(feet[1]) < SERVE_MIN_DEPTH_M:
+        return StrokeCall("overhead", None, call.confidence, call.lateral)
+    return call
+
+
 def serve_position(feet: tuple[float, float] | None, gap: float) -> bool:
     """Hit from behind the baseline near the centre mark, after a pause: a serve."""
     return (
@@ -300,7 +349,6 @@ def run(ctx: SessionContext) -> None:
             gap = t - float(times[i - 1]) if i > 0 else float("inf")
             if i > 0 and not continues_rally(gap, side, prev_side):
                 rally_start = i
-            prev_side = side
             first = i == rally_start
             t_next = (
                 float(times[i + 1])
@@ -322,9 +370,12 @@ def run(ctx: SessionContext) -> None:
             if call.stroke != "serve" and first and serve_position(feet, gap):
                 call = StrokeCall("serve", None, 0.5, call.lateral)
                 serve_by = "position"
-            if call.stroke == "serve" and not first:
-                # A serve always starts a rally (the hits before it were not part of it).
-                rally_start = i
+            call = not_a_serve_mid_rally(call, first, feet)
+            prev_side = side
+            if call.stroke != "serve":
+                serve_by = None
+            elif not first:
+                rally_start = i  # a serve always starts a rally
             toward_y = 1.0 if side < 0 else -1.0
             row: dict[str, Any] = {
                 "video": vd.info.id,
@@ -335,7 +386,10 @@ def run(ctx: SessionContext) -> None:
                 "spin": call.spin,
                 "stroke_confidence": round(call.confidence, 3),
                 "sources": list(vd.hits["sources"][i]),
-                "quality": {"hit_score": round(float(vd.hits["score"][i]), 3)},
+                "quality": {
+                    "hit_score": round(float(vd.hits["score"][i]), 3),
+                    "sound": bool(vd.hits["sound"][i]) if "sound" in vd.hits else True,
+                },
                 "metrics": {},
             }
             if serve_by:

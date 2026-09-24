@@ -454,6 +454,20 @@ def save_thumbnail(ctx: SessionContext, label: str, group: Group) -> str | None:
     return rel
 
 
+def _drop_if_orphan(db: Any, player_id: int) -> None:
+    """Remove an automatic profile that no session refers to any more.
+
+    A profile the user renamed or merged is kept: it may hold a name worth keeping, and the
+    ``players`` stage only cleans up profiles it touched itself.
+    """
+    profile = db.get(Player, player_id)
+    if profile is None or not profile.name.startswith("Player ") or profile.merged_into:
+        return
+    still_used = db.exec(select(SessionPlayer).where(SessionPlayer.player_id == player_id)).first()
+    if still_used is None:
+        db.delete(profile)
+
+
 def run(ctx: SessionContext) -> None:
     tracks = [t for v in ctx.videos for t in load_tracks(v)]
     players, concurrent = find_players(tracks)
@@ -498,6 +512,8 @@ def run(ctx: SessionContext) -> None:
                 db.add(player_row)
         for sp in existing.values():  # a label that no longer exists
             db.delete(sp)
+            db.flush()
+            _drop_if_orphan(db, sp.player_id)
     ctx.log(
         "players",
         count=len(players),

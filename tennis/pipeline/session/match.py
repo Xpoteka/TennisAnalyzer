@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from sqlmodel import col, select
 
 from tennis.analysis.kind import RallyInfo, classify_session
-from tennis.analysis.scoring import Point, keep_score, point_score_text
+from tennis.analysis.scoring import Point, keep_score
 from tennis.db import session_scope
 from tennis.db.models import Rally, Session, SessionPlayer, Shot
 
@@ -117,6 +117,26 @@ def service_box(serve: Shot) -> int | None:
     return -1 if serve.hit_x < 0 else 1
 
 
+def serve_end(serve: Shot) -> int:
+    """The end the server stood at: -1 near, +1 far, 0 unknown."""
+    if serve.hit_y is None or serve.hit_y == 0:
+        return 0
+    return 1 if serve.hit_y > 0 else -1
+
+
+def serve_court(serve: Shot) -> int:
+    """Deuce court (+1) or ad court (-1), 0 when unclear.
+
+    The deuce court is on the server's right. Court x runs to the right as seen from the
+    near end, so it is +x for the near server and -x for the far one.
+    """
+    side = service_box(serve)
+    end = serve_end(serve)
+    if side is None or end == 0:
+        return 0
+    return -side * end
+
+
 def was_fault(shots: list[Shot], nxt: list[Shot] | None) -> bool:
     """A short serve rally followed by the same player serving again from the same box."""
     if nxt is None or len(shots) > FAULT_MAX_SHOTS or shots[0].in_court is True:
@@ -157,7 +177,15 @@ def run_scoring(ctx: SessionContext) -> None:
         if next_same_server and nxt is not None and was_fault(shots, nxt[1]):
             if pending_fault is not None:  # second fault in a row: double fault
                 points.append(
-                    {"rally": r, "server": server, "p": 0.08, "how": "double_fault", "faults": 2}
+                    {
+                        "rally": r,
+                        "server": server,
+                        "p": 0.08,
+                        "how": "double_fault",
+                        "faults": 2,
+                        "end": serve_end(shots[0]),
+                        "box": serve_court(shots[0]),
+                    }
                 )
                 faults.append(pending_fault[0])
                 pending_fault = None
@@ -168,13 +196,23 @@ def run_scoring(ctx: SessionContext) -> None:
         hitter = index.get(last.player_id or -1, server)
         p, how = point_probability(last, server, hitter)
         points.append(
-            {"rally": r, "server": server, "p": p, "how": how, "faults": 1 if pending_fault else 0}
+            {
+                "rally": r,
+                "server": server,
+                "p": p,
+                "how": how,
+                "faults": 1 if pending_fault else 0,
+                "end": serve_end(shots[0]),
+                "box": serve_court(shots[0]),
+            }
         )
         if pending_fault is not None:
             faults.append(pending_fault[0])
         pending_fault = None
 
-    score = keep_score([Point(pt["server"], pt["p"]) for pt in points])
+    score = keep_score(
+        [Point(pt["server"], pt["p"], end=pt["end"], box=pt["box"]) for pt in points]
+    )
     point_rally_ids = {pt["rally"].id for pt in points}
     fault_ids = {r.id for r in faults}
     won = {0: 0, 1: 0}
@@ -183,30 +221,6 @@ def run_scoring(ctx: SessionContext) -> None:
     aces = {0: 0, 1: 0}
     double_faults = {0: 0, 1: 0}
     with session_scope(ctx.data_root) as db:
-        # Running score before each point, walking the decoded games.
-        before: list[str] = []
-        sets: list[tuple[int, int]] = []
-        games = [0, 0]
-        for game in score.games:
-            a = b = 0
-            for w in game.points:
-                srv = game.server
-                pts = (a, b)
-                prefix = " ".join(f"{x}-{y}" for x, y in sets)
-                before.append(
-                    f"{prefix + ' ' if prefix else ''}{games[0]}-{games[1]}, "
-                    f"{point_score_text(*pts, tiebreak=game.tiebreak)}"
-                )
-                if w == srv:
-                    a += 1
-                else:
-                    b += 1
-            if game.winner is not None:
-                games[game.winner] += 1
-                done = (max(games) >= 6 and abs(games[0] - games[1]) >= 2) or max(games) == 7
-                if done:
-                    sets.append((games[0], games[1]))
-                    games = [0, 0]
         for i, pt in enumerate(points):
             row = db.get(Rally, pt["rally"].id)
             if row is None:
@@ -215,7 +229,7 @@ def run_scoring(ctx: SessionContext) -> None:
             row.server_id = players[pt["server"]]
             row.winner_id = players[winner] if winner is not None else None
             row.end_reason = pt["how"]
-            row.score_before = {"text": before[i] if i < len(before) else None, "point": i}
+            row.score_before = {"text": score.before[i], "point": i}
             db.add(row)
             if winner is not None:
                 won[winner] += 1

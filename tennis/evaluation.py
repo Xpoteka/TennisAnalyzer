@@ -213,17 +213,21 @@ def evaluate_games(
     checkpoints: list[tuple[float, int, int]],
     *,
     final: str = "",
-    max_wait_s: float = 180.0,
 ) -> GameReport:
     """``points``: (start time, score text before the point). ``checkpoints``: (t, self, other).
 
     At each checkpoint the score before the first point starting after ``t`` is read; the
     scoreboard was updated between points, so that point's score is what it should show.
+    After the last point, the final score stands (a checkpoint in the break after a set
+    may be minutes before the next point).
     """
     found: list[tuple[int, int] | None] = []
     for t, _, _ in checkpoints:
-        nxt = next((p for p in points if t <= p[0] <= t + max_wait_s), None)
-        found.append(parse_score(nxt[1]) if nxt else None)
+        nxt = next((p for p in points if p[0] >= t), None)
+        if nxt is not None:
+            found.append(parse_score(nxt[1]))
+        else:
+            found.append(parse_score(final) if final else None)
     best: tuple[float, int, bool] | None = None
     for self_first in (True, False):
         err = 0.0

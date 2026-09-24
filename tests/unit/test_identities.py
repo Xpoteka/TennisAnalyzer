@@ -71,3 +71,24 @@ def test_short_tracks_go_to_the_player_on_that_side() -> None:
     assign_by_side(players, [stray])
     owner = next(g for g in players if any(t.id == 2 for t in g.tracks))
     assert any(t.id == 3 for t in owner.tracks)
+
+
+def test_a_vanished_label_drops_its_unused_profile(data_root) -> None:  # type: ignore[no-untyped-def]
+    from sqlmodel import select
+
+    from tennis.db import session_scope
+    from tennis.db.models import Player, Session, SessionPlayer
+    from tennis.pipeline.session.identities import _drop_if_orphan
+
+    with session_scope(data_root) as db:
+        sess = Session(name="s")
+        auto, named, shared = Player(name="Player 3"), Player(name="Josi"), Player(name="Player 5")
+        db.add_all([sess, auto, named, shared])
+        db.flush()
+        assert sess.id and auto.id and named.id and shared.id
+        db.add(SessionPlayer(session_id=sess.id, player_id=shared.id, label="A"))
+        db.flush()
+        for pid in (auto.id, named.id, shared.id):
+            _drop_if_orphan(db, pid)
+        left = {p.name for p in db.exec(select(Player))}
+    assert left == {"Josi", "Player 5"}
